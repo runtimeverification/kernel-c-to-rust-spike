@@ -31,10 +31,14 @@ the relationship between allocation sizing and parse writes.
   `cargo test` pass on stable rustc. Driving the Rust `.so` through the C
   test harness produces byte-identical output. Details:
   [rust/README.md](rust/README.md). ✅
-- **Phase 3 — differential fuzzing** (`fuzz/`): planned only. One byte buffer
-  → both libraries via the shared C ABI → field-wise output comparison, with
-  ASan (C) and panic (Rust) as the memory-safety oracles. Recommended harness:
-  LibAFL (builds on stable). Plan: [fuzz/PLAN.md](fuzz/PLAN.md). 📋 not started.
+- **Phase 3 — differential fuzzing** (`fuzz/`): LibAFL harness on stable rustc
+  drives both libraries from one split input and compares results field-wise.
+  54k executions at 93% edge coverage found one divergence — the signed-
+  overflow UB site — which was fixed so the implementations converge; no OOB is
+  reachable in the patched v7.2-rc2 code. A negative control reintroduces the
+  CVE-2024-53104 mismatch and shows the payoff: C does an out-of-bounds write
+  (ASan), Rust safely panics. Plan: [fuzz/PLAN.md](fuzz/PLAN.md); results:
+  [fuzz/RESULTS.md](fuzz/RESULTS.md). ✅
 
 ## Layout
 
