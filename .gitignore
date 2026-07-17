@@ -1,0 +1,24 @@
+# C build artifacts
+*.o
+*.a
+*.so
+c/libuvcparse_c*.a
+c/libuvcparse_c*.so
+
+# Rust build artifacts
+/rust/target/
+**/*.rs.bk
+
+# Fuzzing build/run artifacts (corpus/, dict/, findings/ ARE tracked)
+/fuzz/target/
+/fuzz/crashes/
+/fuzz/*.log
+/fuzz/.cur_input*
+/rust/target/
+
+# Verification (Charon/Aeneas/Lean) build artifacts
+/verify/target/
+/verify/uvc_verify.llbc
+/verify/lean/.lake/
+/verify/lean/build/
+/verify/lean/UvcVerify-*.lean

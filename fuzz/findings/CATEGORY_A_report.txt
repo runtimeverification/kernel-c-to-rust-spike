@@ -1,0 +1,28 @@
+=== Category (a): CVE-2024-53104-class OOB write (negative control) ===
+
+The faithful v7.2-rc2 code is patched: 54,019 executions found NO OOB.
+To demonstrate the harness catches the CVE class, an opt-in under-count
+(-DSPIKE_VULN in C, --features vuln in Rust) reintroduces the historical
+counting-vs-parsing mismatch. Same reproducer input, same bug, both sides:
+
+Reproducer: CATEGORY_A_cve2024-53104_class.bin (a valid uncompressed-YUYV descriptor)
+
+--- C (vulnerable) under AddressSanitizer: memory corruption ---
+=================================================================
+==141756==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x504000000038 at pc 0x56ac6454923b bp 0x7ffc17f90690 sp 0x7ffc17f90680
+WRITE of size 1 at 0x504000000038 thread T0
+    #0 0x56ac6454923a in uvc_parse_frame ../c/uvc_parse.c:634
+    #1 0x56ac6454a7ad in uvc_parse_format ../c/uvc_parse.c:874
+    #2 0x56ac6454b535 in uvc_parse ../c/uvc_parse.c:1066
+    #3 0x56ac64548761 in main /home/natalie/kernel-c-to-rust-spike/fuzz/triage.c:43
+    #4 0x74add5029d8f in __libc_start_call_main ../sysdeps/nptl/libc_start_call_main.h:58
+    #5 0x74add5029e3f in __libc_start_main_impl ../csu/libc-start.c:392
+    #6 0x56ac645483a4 in _start (/tmp/triage_c_vuln_asan+0x23a4)
+
+0x504000000038 is located 0 bytes to the right of 40-byte region [0x504000000010,0x504000000038)
+allocated by thread T0 here:
+    #0 0x74add54b4887 in __interceptor_malloc ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:145
+    #1 0x56ac64548e3a in kzalloc ../c/uvc_parse.c:83
+    #2 0x56ac6454b1e4 in uvc_parse ../c/uvc_parse.c:1032
+    #3 0x56ac64548761 in main /home/natalie/kernel-c-to-rust-spike/fuzz/triage.c:43
+Rust: PANIC (memory-safe refusal): index out of bounds: the len is 0 but the index is 0
