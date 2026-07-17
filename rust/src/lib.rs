@@ -30,7 +30,7 @@ pub const UVC_MAX_FRAMES: usize = 256;
 pub const UVC_MAX_INTERVALS: usize = 1024;
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct UvcFormatOut {
     pub type_: u8,
     pub index: u8,
@@ -45,7 +45,7 @@ pub struct UvcFormatOut {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct UvcFrameOut {
     pub b_frame_index: u8,
     pub bm_capabilities: u8,
@@ -413,16 +413,25 @@ impl ParseState {
             self.intervals[iv_base + i] = if interval != 0 { interval } else { 1 };
         }
 
-        // Uncompressed: recompute the buffer size. DEVIATION: none — this is
-        // the C `bpp * wWidth * wHeight / 8` in 32-bit signed arithmetic,
-        // reproduced with wrapping_mul (the C relies on 32-bit wraparound here
-        // and this is a documented signed-overflow UB site in the original).
+        // Uncompressed: recompute the buffer size.
+        //
+        // DEVIATION (signed-overflow UB site). The C is
+        // `bpp * wWidth * wHeight / 8` in 32-bit `int` arithmetic. The product
+        // can exceed INT_MAX, which is signed-overflow *undefined behaviour* in
+        // C, so the result is whatever the compiler emits. clang at -O1 (the
+        // build the differential fuzzer links) assumes the operands are
+        // non-negative and no overflow occurs, and emits `imul; imul; shrl $3`
+        // — a 32-bit wrapping multiply followed by an UNSIGNED shift-right by 3.
+        // We reproduce exactly that so the Rust faithfully models the compiled
+        // C. (Phase 2 originally used a signed `/8`; the differential fuzzer
+        // caught the mismatch on the first run — see fuzz/RESULTS.md.) The
+        // value is only meaningful for well-formed, non-overflowing descriptors;
+        // this convergence is with the clang-compiled C specifically.
         if format.flags & UVC_FMT_FLAG_COMPRESSED == 0 {
-            let v = (format.bpp as i32)
-                .wrapping_mul(frame.w_width as i32)
-                .wrapping_mul(frame.w_height as i32)
-                / 8;
-            frame.dw_max_video_frame_buffer_size = v as u32;
+            let prod = (format.bpp as u32)
+                .wrapping_mul(frame.w_width as u32)
+                .wrapping_mul(frame.w_height as u32);
+            frame.dw_max_video_frame_buffer_size = prod >> 3;
         }
 
         // Clamp the default interval. Reads dwFrameInterval[0] and
@@ -631,7 +640,12 @@ impl ParseState {
 // Ports uvc_parse_streaming.c:657-764 (header parsing excluded).
 // ======================================================================
 
-fn parse(buf: &[u8], quirks: u32, out: &mut UvcParseResult) -> i32 {
+/// Native (Rust-ABI) entry point. The `#[no_mangle] extern "C" fn uvc_parse`
+/// below is a thin wrapper over this; the differential fuzzer calls `parse`
+/// directly so that a bounds-check panic *unwinds* (catchable) instead of
+/// aborting at the C-ABI boundary (Rust >= 1.81 aborts panics across
+/// `extern "C"`). Both paths write the identical `#[repr(C)]` result.
+pub fn parse(buf: &[u8], quirks: u32, out: &mut UvcParseResult) -> i32 {
     // Zero the result (mirrors the C memset).
     out.ret = 0;
     out.nformats_alloc = 0;
@@ -665,9 +679,19 @@ fn parse(buf: &[u8], quirks: u32, out: &mut UvcParseResult) -> i32 {
                 }
                 UVC_VS_FORMAT_MPEG2TS | UVC_VS_FORMAT_STREAM_BASED => {}
                 UVC_VS_FRAME_UNCOMPRESSED | UVC_VS_FRAME_MJPEG => {
-                    nframes += 1;
-                    if buflen > 25 {
-                        nintervals += if buf[pos + 25] != 0 { buf[pos + 25] as u32 } else { 3 };
+                    // SPIKE-VULN (negative control, `--features vuln`): mirror
+                    // the C's `-DSPIKE_VULN` under-count so both sides carry
+                    // the identical CVE-2024-53104-class bug. The C then writes
+                    // out of bounds (UB / ASan abort); this Rust indexes an
+                    // under-sized Vec and panics (memory-safe). See
+                    // fuzz/RESULTS.md.
+                    #[cfg(not(feature = "vuln"))]
+                    {
+                        nframes += 1;
+                        if buflen > 25 {
+                            nintervals +=
+                                if buf[pos + 25] != 0 { buf[pos + 25] as u32 } else { 3 };
+                        }
                     }
                 }
                 UVC_VS_FRAME_FRAME_BASED => {
