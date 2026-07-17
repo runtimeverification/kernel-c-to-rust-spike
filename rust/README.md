@@ -63,11 +63,12 @@ parsing above it is safe Rust.
 
 2. **Signed-overflow site made explicit.** The uncompressed buffer-size
    recompute `bpp * wWidth * wHeight / 8` is 32-bit signed arithmetic that can
-   overflow in the C (undefined behaviour there; in practice GCC wraps). Rust
-   would panic on overflow with `overflow-checks = true`, which would be a
-   *spurious* divergence from the C, so this specific expression uses
-   `wrapping_mul` to match GCC's actual wraparound. It is called out as a
-   signed-overflow UB site in the original.
+   overflow in the C — undefined behaviour, so the result is compiler-dependent.
+   Phase 3's differential fuzzer showed this: the Rust models the
+   **clang-compiled** C (which the harness links), computing a wrapping `u32`
+   product then an unsigned `>> 3`, so the equivalence holds for the clang
+   build; gcc resolves the same UB differently (signed `/8`), re-proving it is
+   genuinely UB.
 
 3. **Structural, not behavioural:** pointers become indices. The C
    `format->frames` pointer and `frame->dwFrameInterval` pointer are carried
