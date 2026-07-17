@@ -16,3 +16,6 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 # Keep integer overflow behaviour explicit in the source (wrapping_* where the
 # C relies on 32-bit wraparound); do not let release silently wrap elsewhere.
 overflow-checks = true
+
+[features]
+vuln = []

@@ -1,0 +1,29 @@
+[package]
+name = "uvc_fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Own workspace root so it does not fold into ../rust.
+[workspace]
+
+[[bin]]
+name = "uvc_diff_fuzz"
+path = "src/main.rs"
+
+[dependencies]
+uvc_parse_rs = { path = "../rust" }
+libafl = "0.15"
+libafl_bolts = "0.15"
+libafl_targets = { version = "0.15", features = ["sancov_pcguard_hitcounts", "pointer_maps"] }
+
+[build-dependencies]
+cc = "1"
+
+# catch_unwind must work, so keep unwind (not abort) in all profiles.
+[profile.release]
+panic = "unwind"
+debug = true
+
+[profile.dev]
+panic = "unwind"

@@ -982,9 +982,24 @@ int32_t uvc_parse(const uint8_t *buffer, int32_t buflen, uint32_t quirks,
 
 		case UVC_VS_FRAME_UNCOMPRESSED:
 		case UVC_VS_FRAME_MJPEG:
+#ifndef SPIKE_VULN
 			nframes++;
 			if (_buflen > 25)
 				nintervals += _buffer[25] ? _buffer[25] : 3;
+#else
+			/*
+			 * SPIKE-VULN (negative control, NOT kernel code; enabled
+			 * only with -DSPIKE_VULN): under-count uncompressed/MJPEG
+			 * frames, reintroducing a CVE-2024-53104-class
+			 * counting-vs-parsing mismatch. uvc_parse_format then
+			 * writes frames/intervals past the under-sized allocation
+			 * -> out-of-bounds write. This exists purely to show the
+			 * differential harness catches the CVE class: the C
+			 * corrupts memory (ASan aborts) while the Rust, sized by
+			 * the identical bug, safely panics on the bounds check.
+			 */
+			(void)0;
+#endif
 			break;
 
 		case UVC_VS_FRAME_FRAME_BASED:

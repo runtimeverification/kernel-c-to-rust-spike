@@ -9,7 +9,9 @@ c/libuvcparse_c*.so
 /rust/target/
 **/*.rs.bk
 
-# Fuzzing artifacts (when Phase 3 lands)
+# Fuzzing build/run artifacts (corpus/, dict/, findings/ ARE tracked)
 /fuzz/target/
-/fuzz/corpus/
 /fuzz/crashes/
+/fuzz/*.log
+/fuzz/.cur_input*
+/rust/target/
