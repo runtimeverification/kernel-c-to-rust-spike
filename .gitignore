@@ -15,3 +15,10 @@ c/libuvcparse_c*.so
 /fuzz/*.log
 /fuzz/.cur_input*
 /rust/target/
+
+# Verification (Charon/Aeneas/Lean) build artifacts
+/verify/target/
+/verify/uvc_verify.llbc
+/verify/lean/.lake/
+/verify/lean/build/
+/verify/lean/UvcVerify-*.lean
