@@ -1,0 +1,15 @@
+# C build artifacts
+*.o
+*.a
+*.so
+c/libuvcparse_c*.a
+c/libuvcparse_c*.so
+
+# Rust build artifacts
+/rust/target/
+**/*.rs.bk
+
+# Fuzzing artifacts (when Phase 3 lands)
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/crashes/
