@@ -1,0 +1,18 @@
+[package]
+name = "uvc_parse_rs"
+version = "0.1.0"
+edition = "2021"
+description = "Memory-safe Rust reimplementation of the Linux UVC format/frame descriptor parser (C-to-Rust hardening spike)"
+license = "GPL-2.0"
+
+[lib]
+name = "uvc_parse_rs"
+# cdylib: the C-ABI shared object the differential harness dlopen()s / links.
+# staticlib: the archive for linking the harness statically.
+# rlib: so Rust integration tests and (later) cargo-fuzz can call the crate.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[profile.release]
+# Keep integer overflow behaviour explicit in the source (wrapping_* where the
+# C relies on 32-bit wraparound); do not let release silently wrap elsewhere.
+overflow-checks = true
