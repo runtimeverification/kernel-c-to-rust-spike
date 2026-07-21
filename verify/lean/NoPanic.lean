@@ -130,12 +130,205 @@ theorem parse_total_safety
     `opaque` here so the theorem states the intended contract without prejudging
     its exact formalization. See VERIFY-REPORT.md. -/
 
-opaque WellFormed : Slice Std.U8 → Prop
+/-- Concrete precondition on the INPUT bytes only. `WellFormed buf` says `buf`
+    decomposes (witness `descs`) into a chain of class-specific descriptor
+    blocks that tile the buffer exactly, each self-describing its length, with
+    the buffer bounded. It mentions ONLY `buf` and constants — never `parse`,
+    its result, `frame_base`, or any runtime value. The four conjuncts (i)-(iv)
+    from VERIFY-REPORT are marked below. -/
+def WellFormed (buf : Slice Std.U8) : Prop :=
+  ∃ descs : List (List Std.U8),
+    -- (ii) IN-BOUNDS: the descriptor blocks tile `buf` exactly, in order. With
+    --      each block's declared bLength equal to its real length (below),
+    --      walking by bLength from pos = 0 stays within `buf.length` and lands
+    --      exactly at the end — so every guarded read `buf[pos+k]` is in range.
+    --      Rules out the index `fail`s behind the guards (buflen > 2, ≥ n,
+    --      ≥ 26 + 4·n).
+    descs.flatten = buf.val ∧
+    (∀ d ∈ descs,
+      -- (i) TERMINATION: each block's bLength byte (byte 0) is ≥ 1, so the
+      --     walk's `buflen` strictly decreases every step and all four `loop`s
+      --     terminate. Rules out `div`.
+      1 ≤ (d.getD 0 (0#u8)).val ∧
+      -- (ii) cont.: the declared bLength equals the block's real length, so the
+      --      tiling above is walked precisely by the bLength steps the parser
+      --      takes; and the 3-byte header (bLength, bDescriptorType,
+      --      bDescriptorSubtype) is present.
+      (d.getD 0 (0#u8)).val = d.length ∧
+      3 ≤ d.length) ∧
+    -- (iv) NO OVERFLOW: bound the buffer so the checked arithmetic in `parse`
+    --      cannot overflow. The frame size fields wWidth/wHeight (read as u16)
+    --      and bpp (u8) are inherently bounded by their read widths, and the
+    --      CVE-relevant `bpp*wWidth*wHeight/8` recompute is `wrapping_mul` +
+    --      unsigned `>>3` (total — no `fail`), so those fields need no explicit
+    --      clause. The residual checked arithmetic is `total = buf.len() as i32`
+    --      and the u32 descriptor-count accumulators (`nformats`/`nframes`/
+    --      `nintervals`, each += ≤ 255 per ≥3-byte descriptor, so ≤ 85·length).
+    --      buf.length ≤ 2^24 keeps `total` within i32 and every accumulator
+    --      within u32.
+    buf.length ≤ 16777216
+    -- (iii) SIZED WRITES [documented, not a separate clause; see report]. Both
+    -- the counting pass and the parse pass walk THIS SAME tiling over THIS SAME
+    -- buffer; the parse pass writes a frame/interval only for a descriptor whose
+    -- subtype matches the current format's `ftype`, i.e. for a SUBSET of the
+    -- frame-subtype descriptors the counting pass tallies. Hence
+    -- (parse writes) ≤ (counting tally) structurally, so every write lands
+    -- within the counting-sized `Vec`. This is a consequence of (ii) plus the
+    -- fixed subtype dispatch — not an independent input condition — so it is
+    -- documented here rather than added as a clause. Stating it as "writes stay
+    -- in bounds" would be assuming theorem (A)'s conclusion, which the report
+    -- explicitly warns against; it is deliberately NOT done.
+
+-- ────────────────────────────────────────────────────────────────────────
+-- Lemma scaffolding for (A). Statements only; every body is `sorry`. Phrased
+-- against the extracted functions (`parse`, `parse_loop0`, `parse_loop1`,
+-- `ParseState.uvc_parse_format`, `ParseState.uvc_parse_frame`) and the internal
+-- ParseState cursors — NOT the CAP-truncated output fields. See
+-- COUNTING_LEMMA_NOTES.md.
+-- ────────────────────────────────────────────────────────────────────────
+
+/-- (1) Div-freeness (termination). Under `WellFormed` — specifically conjunct
+    (i): every consumed descriptor has bLength ≥ 1 — each loop's `buflen`
+    measure (and the interval loop's `Range` measure) strictly decreases per
+    iteration, so no loop diverges and `parse` never returns `div`. Loops
+    involved: `parse_loop0` (counting), `parse_loop1` (driving),
+    `ParseState.uvc_parse_format_loop0` (frame loop),
+    `ParseState.uvc_parse_frame_loop` (interval copy). Rules out `div` for (A). -/
+lemma parse_no_div
+    (buf : Slice Std.U8) (quirks : Std.U32) (out : UvcParseResult)
+    (hwf : WellFormed buf) :
+    parse buf quirks out ≠ div := by
+  sorry
+
+/-- Internal-cursor in-bounds predicate: the frames committed so far
+    (`frame_base`) and intervals written so far (`interval_cursor`) are within
+    their allocated `Vec` lengths. Stated on ParseState's internal cursors, NOT
+    on the CAP-truncated `out.nframes`/`out.nintervals`. Necessary but, on its
+    own, NOT sufficient for (2) — it does not bound the current format's demand;
+    that is why (2)'s precondition is phrased against `parse_loop0`. -/
+def CursorsInBounds (st : ParseState) (frame_base : Std.Usize) : Prop :=
+  frame_base.val ≤ st.frames.length ∧ st.interval_cursor.val ≤ st.intervals.length
+
+/-- Additivity of the counting pass in its accumulators. `parse_loop0`'s three
+    accumulators (`nformats`/`nframes`/`nintervals`) are only ever added to; the
+    control flow depends solely on `buf`/`pos`/`buflen`. So running the counting
+    loop from `(pos, buflen)` with initial accumulators `(a, b, c)` yields
+    exactly `(a, b, c)` plus the result of running it from `(pos, buflen)` with
+    zero accumulators. Under `WellFormed` (iv) the sums do not overflow, so the
+    identity is stated on `.val`. THIS IS THE ADDITIVITY the (A) induction needs:
+    together with the loop reaching the next driving-loop position it gives the
+    positional split `count(pos) = block-delta + count(pos+ret)`. Most
+    self-contained lemma (a pure fact about `parse_loop0`); to be proved first. -/
+lemma counting_additive
+    (buf : Slice Std.U8) (a b c : Std.U32) (pos : Std.Usize) (buflen : Std.I32)
+    (hwf : WellFormed buf)
+    (nf0 nfr0 ni0 : Std.U32)
+    (hbase : parse_loop0 buf 0#u32 0#u32 0#u32 pos buflen = ok (nf0, nfr0, ni0)) :
+    ∃ s0 s1 s2,
+      parse_loop0 buf a b c pos buflen = ok (s0, s1, s2) ∧
+      s0.val = a.val + nf0.val ∧
+      s1.val = b.val + nfr0.val ∧
+      s2.val = c.val + ni0.val := by
+  sorry
+
+/-- (2) Frame-loop invariant — THE WORKHORSE (in-bounds writes, internal
+    cursors), strengthened to be directly chainable as the induction step of the
+    driving loop `parse_loop1`. `parse_loop0 buf 0 0 0 pos buflen = (nf,cnt_f,
+    cnt_i)` is the counting pass run from `pos` to the end. The sufficient,
+    INDUCTIVE room precondition is that the allocation leaves room for that
+    remaining tally on top of what is already committed:
+        frame_base + cnt_f ≤ frames.length,  interval_cursor + cnt_i ≤ intervals.length.
+    Because the parse pass writes, for this format, a SUBSET of what counting
+    tallies from `pos` (COUNTING_LEMMA_NOTES §2/§4: same tiling; subtype dispatch
+    `buf[pos+2] == ftype ∈ {tallied subtypes}`; identical interval offsets),
+    `uvc_parse_format` returns `ok`, every write lands in bounds (LOCAL FIT), and
+    — the strengthening — the room bound is RE-ESTABLISHED at the next driving-
+    loop position `pos+ret` for the advanced cursor `frame_base + fmt'.nframes`.
+    The re-establishment is exactly `count(pos) = block-delta + count(pos+ret)`
+    (via `counting_additive`) minus the subset-consumed writes, so
+    `(2)-out` at `pos` IS `(2)-in` at `pos+ret`: the driving-loop induction
+    closes with no prose gap. -/
+lemma frame_loop_invariant
+    (st : ParseState) (quirks : Std.U32) (fmt : UvcFormat)
+    (frame_base : Std.Usize) (buf : Slice Std.U8) (pos : Std.Usize) (buflen : Std.I32)
+    (hwf : WellFormed buf)
+    (nf cnt_f cnt_i : Std.U32)
+    (hcount : parse_loop0 buf 0#u32 0#u32 0#u32 pos buflen = ok (nf, cnt_f, cnt_i))
+    (hroom_f : frame_base.val + cnt_f.val ≤ st.frames.length)
+    (hroom_i : st.interval_cursor.val + cnt_i.val ≤ st.intervals.length) :
+    ∃ ret st' fmt',
+      ParseState.uvc_parse_format st quirks fmt frame_base buf pos buflen
+        = ok (ret, st', fmt') ∧
+      -- LOCAL FIT: this format's frame/interval writes landed in bounds.
+      frame_base.val + fmt'.nframes.val ≤ st'.frames.length ∧
+      st'.interval_cursor.val ≤ st'.intervals.length ∧
+      -- ROOM RE-ESTABLISHED at the next driving-loop position `pos+ret`
+      -- (`pos += ret as usize`, `buflen -= ret`): for the counting tally there,
+      -- the advanced cursor `frame_base + fmt'.nframes` still fits. This is
+      -- literally `(2)`'s room precondition at the next position, so the
+      -- driving-loop induction step is closed.
+      (∀ pos' buflen' nf' cf' ci',
+          pos'.val = pos.val + ret.val.toNat →
+          buflen'.val = buflen.val - ret.val →
+          parse_loop0 buf 0#u32 0#u32 0#u32 pos' buflen' = ok (nf', cf', ci') →
+          (frame_base.val + fmt'.nframes.val) + cf'.val ≤ st'.frames.length ∧
+          st'.interval_cursor.val + ci'.val ≤ st'.intervals.length) := by
+  sorry
+
+/-- (3) Output-level bound (COUNTING_LEMMA_NOTES §3). Human-readable form: on
+    success, the committed counts do not exceed the counting-pass allocation.
+    WEAK / VACUOUS ON THE FAIL PATH (the `--features vuln` control returns
+    `fail`, making the implication trivially true) and CAP-truncated, so it is
+    NOT the workhorse — (A) uses (2), not this. It is a corollary of (2) through
+    the serialization loops, kept only for readability. -/
+lemma counting_bounds_writes
+    (buf : Slice Std.U8) (quirks : Std.U32) (out0 : UvcParseResult)
+    (hwf : WellFormed buf) :
+    ∀ ret out, parse buf quirks out0 = ok (ret, out) →
+      out.nframes.val ≤ out.nframes_alloc.val ∧
+      out.nintervals.val ≤ out.nintervals_alloc.val := by
+  sorry
 
 theorem parse_no_panic_wellformed
     (buf : Slice Std.U8) (quirks : Std.U32) (out : UvcParseResult)
     (hwf : WellFormed buf) :
     ∃ r, parse buf quirks out = ok r := by
+  -- PROOF SKETCH (to be discharged — currently `sorry`). Every step cites a
+  -- lemma; no informal step remains.
+  -- A `Result` is `ok | fail | div`; it suffices to rule out `fail` and `div`.
+  --  • `div`  — ruled out by `parse_no_div` (1) [which internally rests on
+  --             conjunct (i): each loop's measure strictly decreases].
+  --  • `fail` — ruled out branch by branch:
+  --      – reads:  conjunct (ii) of `WellFormed` (buf tiles exactly; bLength =
+  --                block length) gives the invariant `pos + buflen = buf.length`,
+  --                so every guarded index `buf[pos+k]` is `< buf.length`;
+  --      – writes: induct over the driving loop `parse_loop1` with the invariant
+  --                "room bound at the current `(pos, buflen)`", i.e. `(2)`'s
+  --                precondition `frame_base + cnt_f ≤ frames.length ∧
+  --                interval_cursor + cnt_i ≤ intervals.length` where
+  --                `(cnt_f, cnt_i) = parse_loop0 … pos buflen`.
+  --                · BASE: at `pos = 0`, `frames.length` / `intervals.length`
+  --                  ARE `parse_loop0 … 0 total` (the allocation is that
+  --                  counting result), and `frame_base = interval_cursor = 0`,
+  --                  so the invariant holds with equality.
+  --                · STEP (format descriptor): `frame_loop_invariant` (2) gives
+  --                  `uvc_parse_format = ok` (LOCAL FIT ⇒ this block's writes are
+  --                  in bounds) and, in its strengthened postcondition, the room
+  --                  bound RE-ESTABLISHED at `pos+ret` for `frame_base +
+  --                  fmt'.nframes` — which is exactly the invariant at the next
+  --                  `parse_loop1` state. That postcondition is where
+  --                  `counting_additive` is applied: `count(pos) = block-delta +
+  --                  count(pos+ret)` and the writes are a subset of block-delta.
+  --                · STEP (non-format / skip): advances by one bLength; the
+  --                  invariant is preserved by `counting_additive` (one-descriptor
+  --                  split), cursors unchanged.
+  --                Hence every `frames[frame_base+i]` / `intervals[iv_base+i]`
+  --                write index is `<` its Vec length;
+  --      – arith:  conjunct (iv) bounds the checked `+`/`−`/`×`; the one
+  --                CVE-relevant product is `wrapping_mul` + `>>3`, total.
+  --  Combining `parse_no_div` (1) with the (2)+`counting_additive` induction and
+  --  (ii)/(iv), `parse` returns `ok`. (`counting_bounds_writes` (3) is the weak
+  --  human-readable corollary, not used in this proof.)
   sorry
 
 end NoPanic
@@ -150,4 +343,8 @@ end NoPanic
 #print axioms NoPanic.uvc_ycbcr_enc_no_panic
 #print axioms NoPanic.clamp_u32_no_panic
 #print axioms NoPanic.parse_total_safety
+#print axioms NoPanic.parse_no_div
+#print axioms NoPanic.counting_additive
+#print axioms NoPanic.frame_loop_invariant
+#print axioms NoPanic.counting_bounds_writes
 #print axioms NoPanic.parse_no_panic_wellformed
