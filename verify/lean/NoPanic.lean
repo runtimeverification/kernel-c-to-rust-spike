@@ -209,21 +209,44 @@ lemma parse_no_div
 def CursorsInBounds (st : ParseState) (frame_base : Std.Usize) : Prop :=
   frame_base.val ≤ st.frames.length ∧ st.interval_cursor.val ≤ st.intervals.length
 
-/-- Additivity of the counting pass in its accumulators. `parse_loop0`'s three
-    accumulators (`nformats`/`nframes`/`nintervals`) are only ever added to; the
-    control flow depends solely on `buf`/`pos`/`buflen`. So running the counting
-    loop from `(pos, buflen)` with initial accumulators `(a, b, c)` yields
-    exactly `(a, b, c)` plus the result of running it from `(pos, buflen)` with
-    zero accumulators. Under `WellFormed` (iv) the sums do not overflow, so the
-    identity is stated on `.val`. THIS IS THE ADDITIVITY the (A) induction needs:
-    together with the loop reaching the next driving-loop position it gives the
-    positional split `count(pos) = block-delta + count(pos+ret)`. Most
-    self-contained lemma (a pure fact about `parse_loop0`); to be proved first. -/
+/-- Additivity of the counting pass in its accumulators. In `parse_loop0.body`
+    the three accumulators (`nformats`/`nframes`/`nintervals`) are used ONLY as
+    operands of the CHECKED additions `nformats + 1#u32`, `nframes + 1#u32`,
+    `nintervals + 1#u32`, `nintervals + i7`; they never appear in a branch
+    condition (the control flow is decided solely by `buflen`, `buf[pos+1]`,
+    `buf[pos+2]`). So from a fixed `(pos, buflen)` the loop's control path,
+    step count, and termination are independent of the starting accumulators —
+    running with `(a, b, c)` yields `(a, b, c)` plus the run from zero, PROVIDED
+    no checked add overflows.
+    FALSITY OF THE PREVIOUS FORM (Aleph counterexample): with `a b c`
+    unconstrained, take `a = U32.max` and any `buf` whose walk counts ≥ 1 format;
+    then `nformats + 1#u32` overflow-checks and the loop returns `fail`, so
+    `parse_loop0 buf a b c … = fail`, contradicting the claimed `∃ … = ok`. (The
+    same overflow would also break the `.val` equality via wraparound, but the
+    `fail` hits first.) `WellFormed (iv)` bounds the run-from-zero totals but NOT
+    the free `a, b, c`, so it does not save the old statement.
+    FIX: require the final accumulator sums to fit in `U32` (`ha`/`hb`/`hc`).
+    This is exactly the no-overflow condition; it makes every intermediate add
+    (whose operand ≤ the final sum, since tallies only grow) succeed, so the run
+    is `ok` and each `.val` equals the exact Nat sum. In (A) these bounds are
+    discharged from `WellFormed (iv)`: the accumulators are block deltas and the
+    from-zero totals are counts over the buffer, whose sum is ≤ the whole-buffer
+    tally ≤ 85·2^24 < 2^32 (buf.length ≤ 2^24). Non-vacuous (holds for `a=b=c=0`
+    and for all realistic bounded counts). `WellFormed` itself is not needed here
+    (termination transfers from `hbase`); it is where (A) obtains `ha`/`hb`/`hc`.
+    THIS IS THE ADDITIVITY the (A) induction needs: with the loop reaching the
+    next driving-loop position it gives the positional split
+    `count(pos) = block-delta + count(pos+ret)`. Most self-contained lemma (a
+    pure fact about `parse_loop0`); to be proved first. -/
 lemma counting_additive
     (buf : Slice Std.U8) (a b c : Std.U32) (pos : Std.Usize) (buflen : Std.I32)
-    (hwf : WellFormed buf)
     (nf0 nfr0 ni0 : Std.U32)
-    (hbase : parse_loop0 buf 0#u32 0#u32 0#u32 pos buflen = ok (nf0, nfr0, ni0)) :
+    (hbase : parse_loop0 buf 0#u32 0#u32 0#u32 pos buflen = ok (nf0, nfr0, ni0))
+    -- accumulator sums fit in U32 (no checked-add overflow); discharged in (A)
+    -- from `WellFormed (iv)`.
+    (ha : a.val + nf0.val ≤ Std.U32.max)
+    (hb : b.val + nfr0.val ≤ Std.U32.max)
+    (hc : c.val + ni0.val ≤ Std.U32.max) :
     ∃ s0 s1 s2,
       parse_loop0 buf a b c pos buflen = ok (s0, s1, s2) ∧
       s0.val = a.val + nf0.val ∧
