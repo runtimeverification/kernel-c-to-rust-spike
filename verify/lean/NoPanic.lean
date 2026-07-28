@@ -209,6 +209,74 @@ lemma parse_no_div
 def CursorsInBounds (st : ParseState) (frame_base : Std.Usize) : Prop :=
   frame_base.val ≤ st.frames.length ∧ st.interval_cursor.val ≤ st.intervals.length
 
+-- ── Aleph's decomposition of counting_additive (statements only, `sorry`). ──
+
+/-- (Aleph decomposition, 1/3) One-step replay. A single `parse_loop0.body`
+    step that succeeds from zero counters can be replayed from arbitrary shifted
+    counters `(a,b,c)`, shifting the resulting counters by the same amounts,
+    PROVIDED that step's own U32 additions do not overflow. Both body outcomes
+    are covered: `cont` (continue — the delta counters become `a+δ`, with
+    `pos'`/`buflen'` unchanged because the body never reads the accumulators for
+    control flow) and `done` (loop exit — the body returns its input counters, a
+    zero delta, so the exit counters shift by exactly `(a,b,c)`). -/
+lemma counting_step_replay
+    (buf : Slice Std.U8) (a b c : Std.U32) (pos : Std.Usize) (buflen : Std.I32) :
+    (∀ df dfr di pos' buflen',
+        parse_loop0.body buf 0#u32 0#u32 0#u32 pos buflen
+          = ok (ControlFlow.cont (df, dfr, di, pos', buflen')) →
+        a.val + df.val ≤ Std.U32.max →
+        b.val + dfr.val ≤ Std.U32.max →
+        c.val + di.val ≤ Std.U32.max →
+        ∃ sf sfr si,
+          parse_loop0.body buf a b c pos buflen
+            = ok (ControlFlow.cont (sf, sfr, si, pos', buflen')) ∧
+          sf.val = a.val + df.val ∧ sfr.val = b.val + dfr.val ∧ si.val = c.val + di.val)
+    ∧
+    (∀ df dfr di,
+        parse_loop0.body buf 0#u32 0#u32 0#u32 pos buflen
+          = ok (ControlFlow.done (df, dfr, di)) →
+        a.val + df.val ≤ Std.U32.max →
+        b.val + dfr.val ≤ Std.U32.max →
+        c.val + di.val ≤ Std.U32.max →
+        ∃ sf sfr si,
+          parse_loop0.body buf a b c pos buflen
+            = ok (ControlFlow.done (sf, sfr, si)) ∧
+          sf.val = a.val + df.val ∧ sfr.val = b.val + dfr.val ∧ si.val = c.val + di.val) := by
+  sorry
+
+/-- (Aleph decomposition, 2/3) Monotonicity. A successful `parse_loop0` run
+    never decreases any counter (output ≥ input). Combined with (1) this makes
+    every INTERMEDIATE shifted sum ≤ the FINAL shifted sum, so the `ha`/`hb`/`hc`
+    bounds on the final sum discharge every per-step overflow check in the
+    replay induction. -/
+lemma counting_monotone
+    (buf : Slice Std.U8) (a b c : Std.U32) (pos : Std.Usize) (buflen : Std.I32)
+    (sf sfr si : Std.U32)
+    (h : parse_loop0 buf a b c pos buflen = ok (sf, sfr, si)) :
+    a.val ≤ sf.val ∧ b.val ≤ sfr.val ∧ c.val ≤ si.val := by
+  sorry
+
+/-- (Aleph decomposition, 3/3) General replay. `parse_loop0` from `(a,b,c)`
+    follows the same control path as from `(0,0,0)` and returns the from-zero
+    counters shifted by `(a,b,c)`, under the no-overflow bounds `ha`/`hb`/`hc`.
+    Proved by induction on the loop: `counting_step_replay` (1) replays each
+    body step, and `counting_monotone` (2) discharges the per-step overflow
+    checks from the final-sum bounds. `counting_additive` below is the direct
+    specialization of this theorem. -/
+lemma counting_replay
+    (buf : Slice Std.U8) (a b c : Std.U32) (pos : Std.Usize) (buflen : Std.I32)
+    (nf0 nfr0 ni0 : Std.U32)
+    (hbase : parse_loop0 buf 0#u32 0#u32 0#u32 pos buflen = ok (nf0, nfr0, ni0))
+    (ha : a.val + nf0.val ≤ Std.U32.max)
+    (hb : b.val + nfr0.val ≤ Std.U32.max)
+    (hc : c.val + ni0.val ≤ Std.U32.max) :
+    ∃ s0 s1 s2,
+      parse_loop0 buf a b c pos buflen = ok (s0, s1, s2) ∧
+      s0.val = a.val + nf0.val ∧
+      s1.val = b.val + nfr0.val ∧
+      s2.val = c.val + ni0.val := by
+  sorry
+
 /-- Additivity of the counting pass in its accumulators. In `parse_loop0.body`
     the three accumulators (`nformats`/`nframes`/`nintervals`) are used ONLY as
     operands of the CHECKED additions `nformats + 1#u32`, `nframes + 1#u32`,
@@ -252,6 +320,9 @@ lemma counting_additive
       s0.val = a.val + nf0.val ∧
       s1.val = b.val + nfr0.val ∧
       s2.val = c.val + ni0.val := by
+  -- Direct specialization of `counting_replay` (identical statement); once the
+  -- decomposition (1)-(3) above is proved this body becomes:
+  --   exact counting_replay buf a b c pos buflen nf0 nfr0 ni0 hbase ha hb hc
   sorry
 
 /-- (2) Frame-loop invariant — THE WORKHORSE (in-bounds writes, internal
@@ -367,6 +438,9 @@ end NoPanic
 #print axioms NoPanic.clamp_u32_no_panic
 #print axioms NoPanic.parse_total_safety
 #print axioms NoPanic.parse_no_div
+#print axioms NoPanic.counting_step_replay
+#print axioms NoPanic.counting_monotone
+#print axioms NoPanic.counting_replay
 #print axioms NoPanic.counting_additive
 #print axioms NoPanic.frame_loop_invariant
 #print axioms NoPanic.counting_bounds_writes
