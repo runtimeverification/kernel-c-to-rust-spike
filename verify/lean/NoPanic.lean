@@ -211,39 +211,6 @@ def CursorsInBounds (st : ParseState) (frame_base : Std.Usize) : Prop :=
 
 -- ── Aleph's decomposition of counting_additive (statements only, `sorry`). ──
 
-/-- (Aleph decomposition, 1/3) One-step replay. A single `parse_loop0.body`
-    step that succeeds from zero counters can be replayed from arbitrary shifted
-    counters `(a,b,c)`, shifting the resulting counters by the same amounts,
-    PROVIDED that step's own U32 additions do not overflow. Both body outcomes
-    are covered: `cont` (continue — the delta counters become `a+δ`, with
-    `pos'`/`buflen'` unchanged because the body never reads the accumulators for
-    control flow) and `done` (loop exit — the body returns its input counters, a
-    zero delta, so the exit counters shift by exactly `(a,b,c)`). -/
-lemma counting_step_replay
-    (buf : Slice Std.U8) (a b c : Std.U32) (pos : Std.Usize) (buflen : Std.I32) :
-    (∀ df dfr di pos' buflen',
-        parse_loop0.body buf 0#u32 0#u32 0#u32 pos buflen
-          = ok (ControlFlow.cont (df, dfr, di, pos', buflen')) →
-        a.val + df.val ≤ Std.U32.max →
-        b.val + dfr.val ≤ Std.U32.max →
-        c.val + di.val ≤ Std.U32.max →
-        ∃ sf sfr si,
-          parse_loop0.body buf a b c pos buflen
-            = ok (ControlFlow.cont (sf, sfr, si, pos', buflen')) ∧
-          sf.val = a.val + df.val ∧ sfr.val = b.val + dfr.val ∧ si.val = c.val + di.val)
-    ∧
-    (∀ df dfr di,
-        parse_loop0.body buf 0#u32 0#u32 0#u32 pos buflen
-          = ok (ControlFlow.done (df, dfr, di)) →
-        a.val + df.val ≤ Std.U32.max →
-        b.val + dfr.val ≤ Std.U32.max →
-        c.val + di.val ≤ Std.U32.max →
-        ∃ sf sfr si,
-          parse_loop0.body buf a b c pos buflen
-            = ok (ControlFlow.done (sf, sfr, si)) ∧
-          sf.val = a.val + df.val ∧ sfr.val = b.val + dfr.val ∧ si.val = c.val + di.val) := by
-  sorry
-
 -- ── Helpers for counting_monotone (Aleph's plan). ──
 
 /-- (Aleph plan, step 1) A successful checked U32 addition is ≥ its left
@@ -254,6 +221,30 @@ theorem u32_add_ge_left (x y z : Std.U32) (h : x + y = ok z) : x.val ≤ z.val :
   simp only [h] at he
   obtain ⟨-, hz, -⟩ := he
   omega
+
+/-- Replay a checked U32 add from a shifted base. If `0 + k = ok z0` (the
+    from-zero step) and the shifted sum fits, then `base + k` succeeds with value
+    `base.val + z0.val`. This is the per-counter ingredient of the one-step
+    replay: `k` is the literal `1` (format/frame/DV arms) or the interval count
+    `i7`, identical in the from-zero and shifted bodies. -/
+theorem u32_add_replay (base k z0 : Std.U32)
+    (h0 : (0#u32) + k = ok z0) (hb : base.val + z0.val ≤ Std.U32.max) :
+    ∃ w, base + k = ok w ∧ w.val = base.val + z0.val := by
+  have e0 := UScalar.add_equiv (0#u32) k
+  simp only [h0] at e0
+  obtain ⟨-, hz0, -⟩ := e0
+  have hk : z0.val = k.val := by simpa using hz0
+  have hba := UScalar.add_equiv base k
+  cases hbk : base + k with
+  | ok w =>
+    simp only [hbk] at hba
+    obtain ⟨-, hw, -⟩ := hba
+    exact ⟨w, rfl, by omega⟩
+  | fail e =>
+    exfalso
+    simp only [hbk] at hba
+    scalar_tac
+  | div => simp only [hbk] at hba; exact hba.elim
 
 /-- Peel one monadic bind out of an `= ok` hypothesis. -/
 theorem res_bind_eq_ok {γ δ : Type} {x : Result γ} {f : γ → Result δ} {v : δ}
@@ -301,6 +292,156 @@ theorem loop_ok_inv {α β : Type} (body : α → Result (ControlFlow α β))
       | fail e => simp only [r_eq] at hlp; simp at hlp
       | div => simp only [r_eq] at hlp; simp at hlp
   exact key x0 hinv0 y0 hrun
+
+
+set_option maxHeartbeats 1000000 in
+/-- (Aleph decomposition, 1/3) One-step replay. A single `parse_loop0.body`
+    step that succeeds from zero counters can be replayed from arbitrary shifted
+    counters `(a,b,c)`, shifting the resulting counters by the same amounts,
+    PROVIDED that step's own U32 additions do not overflow. Both body outcomes
+    are covered: `cont` (continue — the delta counters become `a+δ`, with
+    `pos'`/`buflen'` unchanged because the body never reads the accumulators for
+    control flow) and `done` (loop exit — the body returns its input counters, a
+    zero delta, so the exit counters shift by exactly `(a,b,c)`). -/
+lemma counting_step_replay
+    (buf : Slice Std.U8) (a b c : Std.U32) (pos : Std.Usize) (buflen : Std.I32) :
+    (∀ df dfr di pos' buflen',
+        parse_loop0.body buf 0#u32 0#u32 0#u32 pos buflen
+          = ok (ControlFlow.cont (df, dfr, di, pos', buflen')) →
+        a.val + df.val ≤ Std.U32.max →
+        b.val + dfr.val ≤ Std.U32.max →
+        c.val + di.val ≤ Std.U32.max →
+        ∃ sf sfr si,
+          parse_loop0.body buf a b c pos buflen
+            = ok (ControlFlow.cont (sf, sfr, si, pos', buflen')) ∧
+          sf.val = a.val + df.val ∧ sfr.val = b.val + dfr.val ∧ si.val = c.val + di.val)
+    ∧
+    (∀ df dfr di,
+        parse_loop0.body buf 0#u32 0#u32 0#u32 pos buflen
+          = ok (ControlFlow.done (df, dfr, di)) →
+        a.val + df.val ≤ Std.U32.max →
+        b.val + dfr.val ≤ Std.U32.max →
+        c.val + di.val ≤ Std.U32.max →
+        ∃ sf sfr si,
+          parse_loop0.body buf a b c pos buflen
+            = ok (ControlFlow.done (sf, sfr, si)) ∧
+          sf.val = a.val + df.val ∧ sfr.val = b.val + dfr.val ∧ si.val = c.val + di.val) := by
+  refine ⟨?cont, ?done⟩
+  case cont =>
+    intro df dfr di pos' buflen' h0 hoa hob hoc
+    simp only [parse_loop0.body] at h0 ⊢
+    by_cases hbl : buflen > 2#i32
+    · rw [if_pos hbl] at h0; simp only [if_pos hbl] at ⊢
+      obtain ⟨i, hi, h0⟩ := res_bind_eq_ok h0; simp only [hi, bind_tc_ok] at ⊢
+      obtain ⟨i1, hi1, h0⟩ := res_bind_eq_ok h0; simp only [hi1, bind_tc_ok] at ⊢
+      by_cases hcs : i1 = USB_DT_CS_INTERFACE
+      · rw [if_pos hcs] at h0; simp only [if_pos hcs] at ⊢
+        obtain ⟨i2, hi2, h0⟩ := res_bind_eq_ok h0; simp only [hi2, bind_tc_ok] at ⊢
+        obtain ⟨i3, hi3, h0⟩ := res_bind_eq_ok h0; simp only [hi3, bind_tc_ok] at ⊢
+        split at h0
+        all_goals
+          (obtain ⟨⟨mf, mfr, mi⟩, hM0, h0⟩ := res_bind_eq_ok h0
+           obtain ⟨i4, hi4, h0⟩ := res_bind_eq_ok h0
+           obtain ⟨i5, hi5, h0⟩ := res_bind_eq_ok h0
+           obtain ⟨tbl, htbl, h0⟩ := res_bind_eq_ok h0
+           obtain ⟨i6, hi6, h0⟩ := res_bind_eq_ok h0
+           obtain ⟨tpos, htpos, h0⟩ := res_bind_eq_ok h0
+           simp only [ok.injEq, ControlFlow.cont.injEq, Prod.mk.injEq] at h0
+           obtain ⟨rfl, rfl, rfl, rfl, rfl⟩ := h0)
+        -- arms in match order: 4,6,16 | 12 | 10,18 | 5,7 | 17 | default
+        case h_1 | h_2 | h_3 =>            -- nformats += 1
+          obtain ⟨z, hz, hM0⟩ := res_bind_eq_ok hM0
+          simp only [ok.injEq, Prod.mk.injEq] at hM0
+          obtain ⟨rfl, rfl, rfl⟩ := hM0
+          obtain ⟨w, hw, hwv⟩ := u32_add_replay a 1#u32 z hz hoa
+          exact ⟨w, b, c, by simp [hw, hi4, hi5, htbl, hi6, htpos, bind_tc_ok],
+                 hwv, by scalar_tac, by scalar_tac⟩
+        case h_4 =>                        -- DV: all three += 1
+          obtain ⟨z1, hz1, hM0⟩ := res_bind_eq_ok hM0
+          obtain ⟨z2, hz2, hM0⟩ := res_bind_eq_ok hM0
+          obtain ⟨z3, hz3, hM0⟩ := res_bind_eq_ok hM0
+          simp only [ok.injEq, Prod.mk.injEq] at hM0
+          obtain ⟨rfl, rfl, rfl⟩ := hM0
+          obtain ⟨w1, hw1, hwv1⟩ := u32_add_replay a 1#u32 z1 hz1 hoa
+          obtain ⟨w2, hw2, hwv2⟩ := u32_add_replay b 1#u32 z2 hz2 hob
+          obtain ⟨w3, hw3, hwv3⟩ := u32_add_replay c 1#u32 z3 hz3 hoc
+          exact ⟨w1, w2, w3,
+                 by simp [hw1, hw2, hw3, hi4, hi5, htbl, hi6, htpos, bind_tc_ok],
+                 hwv1, hwv2, hwv3⟩
+        case h_5 | h_6 | h_10 =>           -- unchanged counters
+          simp only [ok.injEq, Prod.mk.injEq] at hM0
+          obtain ⟨rfl, rfl, rfl⟩ := hM0
+          exact ⟨a, b, c, by simp [hi4, hi5, htbl, hi6, htpos, bind_tc_ok],
+                 by scalar_tac, by scalar_tac, by scalar_tac⟩
+        case h_7 | h_8 =>                  -- frame, interval byte at offset 25
+          obtain ⟨z1, hz1, hM0⟩ := res_bind_eq_ok hM0
+          obtain ⟨z4, hz4, hM0⟩ := res_bind_eq_ok hM0
+          simp only [ok.injEq, Prod.mk.injEq] at hM0
+          obtain ⟨rfl, rfl, rfl⟩ := hM0
+          obtain ⟨w2, hw2, hwv2⟩ := u32_add_replay b 1#u32 z1 hz1 hob
+          by_cases hb25 : buflen > 25#i32
+          · rw [if_pos hb25] at hz4
+            obtain ⟨j5, hj5, hz4⟩ := res_bind_eq_ok hz4
+            obtain ⟨j6, hj6, hz4⟩ := res_bind_eq_ok hz4
+            obtain ⟨j7, hj7, hz4⟩ := res_bind_eq_ok hz4
+            obtain ⟨w3, hw3, hwv3⟩ := u32_add_replay c j7 z4 hz4 hoc
+            refine ⟨a, w2, w3, ?_, by scalar_tac, hwv2, hwv3⟩
+            simp only [hj6, bind_tc_ok] at hj7
+            simp only [hw2, if_pos hb25, hj5, hj6, hj7, hw3, hi4, hi5, htbl,
+              hi6, htpos, bind_tc_ok] <;> rfl
+          · rw [if_neg hb25] at hz4
+            simp only [ok.injEq] at hz4; subst hz4
+            refine ⟨a, w2, c, ?_, by scalar_tac, hwv2, by scalar_tac⟩
+            simp only [hw2, if_neg hb25, hi4, hi5, htbl, hi6, htpos, bind_tc_ok] <;> rfl
+        case h_9 =>                        -- frame, interval byte at offset 21
+          obtain ⟨z1, hz1, hM0⟩ := res_bind_eq_ok hM0
+          obtain ⟨z4, hz4, hM0⟩ := res_bind_eq_ok hM0
+          simp only [ok.injEq, Prod.mk.injEq] at hM0
+          obtain ⟨rfl, rfl, rfl⟩ := hM0
+          obtain ⟨w2, hw2, hwv2⟩ := u32_add_replay b 1#u32 z1 hz1 hob
+          by_cases hb21 : buflen > 21#i32
+          · rw [if_pos hb21] at hz4
+            obtain ⟨j5, hj5, hz4⟩ := res_bind_eq_ok hz4
+            obtain ⟨j6, hj6, hz4⟩ := res_bind_eq_ok hz4
+            obtain ⟨j7, hj7, hz4⟩ := res_bind_eq_ok hz4
+            obtain ⟨w3, hw3, hwv3⟩ := u32_add_replay c j7 z4 hz4 hoc
+            refine ⟨a, w2, w3, ?_, by scalar_tac, hwv2, hwv3⟩
+            simp only [hj6, bind_tc_ok] at hj7
+            simp only [hw2, if_pos hb21, hj5, hj6, hj7, hw3, hi4, hi5, htbl,
+              hi6, htpos, bind_tc_ok] <;> rfl
+          · rw [if_neg hb21] at hz4
+            simp only [ok.injEq] at hz4; subst hz4
+            refine ⟨a, w2, c, ?_, by scalar_tac, hwv2, by scalar_tac⟩
+            simp only [hw2, if_neg hb21, hi4, hi5, htbl, hi6, htpos, bind_tc_ok] <;> rfl
+      · rw [if_neg hcs] at h0; simp at h0
+    · rw [if_neg hbl] at h0; simp at h0
+  case done =>
+    intro df dfr di h0 hoa hob hoc
+    simp only [parse_loop0.body] at h0 ⊢
+    by_cases hbl : buflen > 2#i32
+    · rw [if_pos hbl] at h0; simp only [if_pos hbl] at ⊢
+      obtain ⟨i, hi, h0⟩ := res_bind_eq_ok h0; simp only [hi, bind_tc_ok] at ⊢
+      obtain ⟨i1, hi1, h0⟩ := res_bind_eq_ok h0; simp only [hi1, bind_tc_ok] at ⊢
+      by_cases hcs : i1 = USB_DT_CS_INTERFACE
+      · rw [if_pos hcs] at h0
+        exfalso
+        obtain ⟨_, _, h0⟩ := res_bind_eq_ok h0
+        obtain ⟨_, _, h0⟩ := res_bind_eq_ok h0
+        obtain ⟨_, _, h0⟩ := res_bind_eq_ok h0
+        obtain ⟨_, _, h0⟩ := res_bind_eq_ok h0
+        obtain ⟨_, _, h0⟩ := res_bind_eq_ok h0
+        obtain ⟨_, _, h0⟩ := res_bind_eq_ok h0
+        obtain ⟨_, _, h0⟩ := res_bind_eq_ok h0
+        obtain ⟨_, _, h0⟩ := res_bind_eq_ok h0
+        simp at h0
+      · rw [if_neg hcs] at h0; simp only [if_neg hcs] at ⊢
+        simp only [ok.injEq, ControlFlow.done.injEq, Prod.mk.injEq] at h0
+        obtain ⟨e1, e2, e3⟩ := h0; subst e1; subst e2; subst e3
+        exact ⟨a, b, c, rfl, by scalar_tac, by scalar_tac, by scalar_tac⟩
+    · rw [if_neg hbl] at h0; simp only [if_neg hbl] at ⊢
+      simp only [ok.injEq, ControlFlow.done.injEq, Prod.mk.injEq] at h0
+      obtain ⟨e1, e2, e3⟩ := h0; subst e1; subst e2; subst e3
+      exact ⟨a, b, c, rfl, by scalar_tac, by scalar_tac, by scalar_tac⟩
 
 /-- (Aleph decomposition, 2/3) Monotonicity. A successful `parse_loop0` run
     never decreases any counter (output ≥ input). Combined with (1) this makes
