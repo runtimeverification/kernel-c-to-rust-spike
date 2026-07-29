@@ -244,6 +244,64 @@ lemma counting_step_replay
           sf.val = a.val + df.val ∧ sfr.val = b.val + dfr.val ∧ si.val = c.val + di.val) := by
   sorry
 
+-- ── Helpers for counting_monotone (Aleph's plan). ──
+
+/-- (Aleph plan, step 1) A successful checked U32 addition is ≥ its left
+    operand: no overflow (the add returned `ok`) means the result's value is the
+    exact Nat sum, hence ≥ the left summand. -/
+theorem u32_add_ge_left (x y z : Std.U32) (h : x + y = ok z) : x.val ≤ z.val := by
+  have he := UScalar.add_equiv x y
+  simp only [h] at he
+  obtain ⟨-, hz, -⟩ := he
+  omega
+
+/-- Peel one monadic bind out of an `= ok` hypothesis. -/
+theorem res_bind_eq_ok {γ δ : Type} {x : Result γ} {f : γ → Result δ} {v : δ}
+    (h : (x >>= f) = ok v) : ∃ w, x = ok w ∧ f w = ok v := by
+  cases x with
+  | ok w => exact ⟨w, rfl, by simpa using h⟩
+  | fail e => simp at h
+  | div => simp at h
+
+/-- Partial-correctness loop invariant for Aeneas' `loop` combinator. If `inv`
+    holds on entry, is preserved by every `cont` step, and implies `post` on
+    every `done`, then any SUCCESSFUL run (`loop body x = ok y`) satisfies
+    `post y`. No termination measure is required (the `fail`/`div` outcomes are
+    simply not constrained) — this is what `counting_monotone` needs.
+    Proved via Lean's `loop.fixpoint_induct`; the motive
+    `fun lp => ∀ x, inv x → ∀ y, lp x = ok y → post y` is admissible because it
+    holds at `div` vacuously (same mechanism as Aeneas' `dspec_admissible`). -/
+theorem loop_ok_inv {α β : Type} (body : α → Result (ControlFlow α β))
+    (inv : α → Prop) (post : β → Prop)
+    (hcont : ∀ x x', inv x → body x = ok (ControlFlow.cont x') → inv x')
+    (hdone : ∀ x z, inv x → body x = ok (ControlFlow.done z) → post z)
+    (x0 : α) (y0 : β) (hinv0 : inv x0) (hrun : loop body x0 = ok y0) : post y0 := by
+  have key : ∀ x, inv x → ∀ y, loop body x = ok y → post y := by
+    apply loop.fixpoint_induct body
+      (motive := fun lp => ∀ x, inv x → ∀ y, lp x = ok y → post y)
+    · -- admissibility: vacuous at `div`
+      apply Lean.Order.admissible_pi; intro x
+      apply Lean.Order.admissible_apply
+        (fun _ (r : Result β) => inv x → ∀ y, r = ok y → post y)
+      apply Lean.Order.admissible_flatOrder
+      simp
+    · -- one-unfold step
+      intro lp ih x hinv y hlp
+      cases r_eq : body x with
+      | ok r =>
+        cases r with
+        | cont x' =>
+          simp only [r_eq] at hlp
+          exact ih x' (hcont x x' hinv r_eq) y hlp
+        | done z =>
+          simp only [r_eq] at hlp
+          injection hlp with hzy
+          subst hzy
+          exact hdone x z hinv r_eq
+      | fail e => simp only [r_eq] at hlp; simp at hlp
+      | div => simp only [r_eq] at hlp; simp at hlp
+  exact key x0 hinv0 y0 hrun
+
 /-- (Aleph decomposition, 2/3) Monotonicity. A successful `parse_loop0` run
     never decreases any counter (output ≥ input). Combined with (1) this makes
     every INTERMEDIATE shifted sum ≤ the FINAL shifted sum, so the `ha`/`hb`/`hc`
@@ -254,7 +312,103 @@ lemma counting_monotone
     (sf sfr si : Std.U32)
     (h : parse_loop0 buf a b c pos buflen = ok (sf, sfr, si)) :
     a.val ≤ sf.val ∧ b.val ≤ sfr.val ∧ c.val ≤ si.val := by
-  sorry
+  unfold parse_loop0 at h
+  refine loop_ok_inv _
+    (fun st => a.val ≤ st.1.val ∧ b.val ≤ st.2.1.val ∧ c.val ≤ st.2.2.1.val)
+    (fun y => a.val ≤ y.1.val ∧ b.val ≤ y.2.1.val ∧ c.val ≤ y.2.2.val)
+    ?hcont ?hdone _ _ ?hinv0 h
+  case hinv0 => exact ⟨le_refl _, le_refl _, le_refl _⟩
+  case hcont =>
+    intro x x' hinv hbody
+    obtain ⟨nf, nfr, ni, p, bl⟩ := x
+    obtain ⟨ha, hb, hc⟩ := hinv
+    simp only [parse_loop0.body] at hbody
+    -- peel to the subtype-match result and the cont tail
+    split at hbody
+    · -- bl > 2
+      obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody          -- p + 1
+      obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody          -- index (pos+1)
+      split at hbody
+      · -- byte[1] = CS_INTERFACE : the cont path
+        obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody        -- p + 2
+        obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody        -- index (pos+2)
+        obtain ⟨⟨nf1, nfr1, ni1⟩, hM, hbody⟩ := res_bind_eq_ok hbody  -- subtype match
+        -- peel the 5 tail binds that compute pos1/buflen1 (counters untouched)
+        obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody
+        obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody
+        obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody
+        obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody
+        obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody
+        -- hbody : ok (cont (nf1,nfr1,ni1,_,_)) = ok (cont x')  ⇒  x' = (nf1,nfr1,ni1,_,_)
+        simp only [ok.injEq, ControlFlow.cont.injEq] at hbody
+        subst hbody
+        -- monotonicity of the subtype-match block: (nf,nfr,ni) ≤ (nf1,nfr1,ni1)
+        have hmono : nf.val ≤ nf1.val ∧ nfr.val ≤ nfr1.val ∧ ni.val ≤ ni1.val := by
+          split at hM <;>
+            first
+            | -- unchanged arms
+              (simp only [ok.injEq, Prod.mk.injEq] at hM; obtain ⟨e1, e2, e3⟩ := hM;
+               subst e1; subst e2; subst e3; exact ⟨le_refl _, le_refl _, le_refl _⟩)
+            | -- single +1 (nformats)
+              (obtain ⟨w1, hw1, hM⟩ := res_bind_eq_ok hM;
+               simp only [ok.injEq, Prod.mk.injEq] at hM; obtain ⟨e1, e2, e3⟩ := hM;
+               subst e1; subst e2; subst e3;
+               exact ⟨u32_add_ge_left _ _ _ hw1, le_refl _, le_refl _⟩)
+            | -- triple +1 (DV)
+              (obtain ⟨w1, hw1, hM⟩ := res_bind_eq_ok hM;
+               obtain ⟨w2, hw2, hM⟩ := res_bind_eq_ok hM;
+               obtain ⟨w3, hw3, hM⟩ := res_bind_eq_ok hM;
+               simp only [ok.injEq, Prod.mk.injEq] at hM; obtain ⟨e1, e2, e3⟩ := hM;
+               subst e1; subst e2; subst e3;
+               exact ⟨u32_add_ge_left _ _ _ hw1, u32_add_ge_left _ _ _ hw2,
+                      u32_add_ge_left _ _ _ hw3⟩)
+            | -- frame arms: nframes+1, intervals += (byte?:3)
+              (obtain ⟨w1, hw1, hM⟩ := res_bind_eq_ok hM;
+               obtain ⟨w4, hi4, hM⟩ := res_bind_eq_ok hM;
+               simp only [ok.injEq, Prod.mk.injEq] at hM; obtain ⟨e1, e2, e3⟩ := hM;
+               subst e1; subst e2; subst e3;
+               refine ⟨le_refl _, u32_add_ge_left _ _ _ hw1, ?_⟩;
+               split at hi4
+               · obtain ⟨_, _, hi4⟩ := res_bind_eq_ok hi4;
+                 obtain ⟨_, _, hi4⟩ := res_bind_eq_ok hi4;
+                 obtain ⟨_, _, hi4⟩ := res_bind_eq_ok hi4;
+                 exact u32_add_ge_left _ _ _ hi4
+               · simp only [ok.injEq] at hi4; subst hi4; exact le_refl _)
+        obtain ⟨hm1, hm2, hm3⟩ := hmono
+        exact ⟨le_trans ha hm1, le_trans hb hm2, le_trans hc hm3⟩
+      · -- byte[1] ≠ CS_INTERFACE : done branch, contradicts cont
+        simp at hbody
+    · -- bl ≤ 2 : done branch, contradicts cont
+      simp at hbody
+  case hdone =>
+    intro x z hinv hbody
+    obtain ⟨nf, nfr, ni, p, bl⟩ := x
+    obtain ⟨ha, hb, hc⟩ := hinv
+    simp only [parse_loop0.body] at hbody
+    split at hbody
+    · -- bl > 2
+      obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody
+      obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody
+      split at hbody
+      · -- CS_INTERFACE : cont path, contradicts done
+        exfalso
+        obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody
+        obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody
+        obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody
+        obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody
+        obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody
+        obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody
+        obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody
+        obtain ⟨_, _, hbody⟩ := res_bind_eq_ok hbody
+        simp at hbody
+      · -- ¬CS : done (nf,nfr,ni)
+        simp only [ok.injEq, ControlFlow.done.injEq] at hbody
+        subst hbody
+        exact ⟨ha, hb, hc⟩
+    · -- bl ≤ 2 : done (nf,nfr,ni)
+      simp only [ok.injEq, ControlFlow.done.injEq] at hbody
+      subst hbody
+      exact ⟨ha, hb, hc⟩
 
 /-- (Aleph decomposition, 3/3) General replay. `parse_loop0` from `(a,b,c)`
     follows the same control path as from `(0,0,0)` and returns the from-zero
@@ -437,6 +591,9 @@ end NoPanic
 #print axioms NoPanic.uvc_ycbcr_enc_no_panic
 #print axioms NoPanic.clamp_u32_no_panic
 #print axioms NoPanic.parse_total_safety
+#print axioms NoPanic.u32_add_ge_left
+#print axioms NoPanic.res_bind_eq_ok
+#print axioms NoPanic.loop_ok_inv
 #print axioms NoPanic.parse_no_div
 #print axioms NoPanic.counting_step_replay
 #print axioms NoPanic.counting_monotone
@@ -445,3 +602,4 @@ end NoPanic
 #print axioms NoPanic.frame_loop_invariant
 #print axioms NoPanic.counting_bounds_writes
 #print axioms NoPanic.parse_no_panic_wellformed
+
