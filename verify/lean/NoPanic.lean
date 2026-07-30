@@ -246,6 +246,30 @@ theorem u32_add_replay (base k z0 : Std.U32)
     scalar_tac
   | div => simp only [hbk] at hba; exact hba.elim
 
+/-- Shift a checked U32 add by a constant. If `base + k = ok F` and `Sh` is
+    `base` shifted up by `sh` (`Sh.val = sh.val + base.val`), then `Sh + k`
+    succeeds with value `sh.val + F.val`, provided that sum fits in `U32`. This
+    is the ARBITRARY-BASE generalization of `u32_add_replay` (which is the
+    `base = 0` case). It is what lets the one-step replay be stated (and lifted)
+    at nonzero accumulators — after the loop's first iteration the counters are
+    no longer zero, so the from-zero `u32_add_replay` alone cannot carry the
+    replay through the whole loop. -/
+theorem u32_add_shift (base sh k F Sh : Std.U32)
+    (hF : base + k = ok F) (hSh : Sh.val = sh.val + base.val)
+    (hbnd : sh.val + F.val ≤ Std.U32.max) :
+    ∃ w, Sh + k = ok w ∧ w.val = sh.val + F.val := by
+  have eF := UScalar.add_equiv base k
+  simp only [hF] at eF
+  obtain ⟨-, hFv, -⟩ := eF
+  have eS := UScalar.add_equiv Sh k
+  cases hSc : Sh + k with
+  | ok w =>
+    simp only [hSc] at eS
+    obtain ⟨-, hwv, -⟩ := eS
+    exact ⟨w, rfl, by omega⟩
+  | fail e => exfalso; simp only [hSc] at eS; scalar_tac
+  | div => simp only [hSc] at eS; exact eS.elim
+
 /-- Peel one monadic bind out of an `= ok` hypothesis. -/
 theorem res_bind_eq_ok {γ δ : Type} {x : Result γ} {f : γ → Result δ} {v : δ}
     (h : (x >>= f) = ok v) : ∃ w, x = ok w ∧ f w = ok v := by
@@ -292,6 +316,27 @@ theorem loop_ok_inv {α β : Type} (body : α → Result (ControlFlow α β))
       | fail e => simp only [r_eq] at hlp; simp at hlp
       | div => simp only [r_eq] at hlp; simp at hlp
   exact key x0 hinv0 y0 hrun
+
+/-- One `loop` unfolding on a `cont` step: the run from `x` equals the run from
+    the continuation state `x'`. -/
+theorem loop_step_cont {α β : Type} (body : α → Result (ControlFlow α β))
+    (x x' : α) (h : body x = ok (ControlFlow.cont x')) :
+    loop body x = loop body x' := by rw [loop.eq_def, h]
+
+/-- One `loop` unfolding on a `done` step: the run from `x` returns `y`. -/
+theorem loop_step_done {α β : Type} (body : α → Result (ControlFlow α β))
+    (x : α) (y : β) (h : body x = ok (ControlFlow.done y)) :
+    loop body x = ok y := by rw [loop.eq_def, h]
+
+/-- `parse_loop0` as a bare `loop` over a projection-style body (defeq to the
+    Aeneas-generated pattern-lambda). Lets the loop lemmas above refer to a
+    single, syntactically stable body term. -/
+theorem parse_loop0_eq (buf : Slice Std.U8) (nf nfr ni : Std.U32)
+    (pos : Std.Usize) (buflen : Std.I32) :
+    parse_loop0 buf nf nfr ni pos buflen
+      = loop (fun (x : Std.U32 × Std.U32 × Std.U32 × Std.Usize × Std.I32) =>
+          parse_loop0.body buf x.1 x.2.1 x.2.2.1 x.2.2.2.1 x.2.2.2.2)
+          (nf, nfr, ni, pos, buflen) := rfl
 
 
 set_option maxHeartbeats 1000000 in
@@ -551,6 +596,160 @@ lemma counting_monotone
       subst hbody
       exact ⟨ha, hb, hc⟩
 
+set_option maxHeartbeats 1000000 in
+/-- ARBITRARY-BASE one-step replay. Same statement as `counting_step_replay`
+    but the reference run starts from arbitrary accumulators `(nf,nfr,ni)`
+    rather than `(0,0,0)`, and the replayed run starts from `(Nf,Nfr,Ni)` with
+    `Nf.val = a.val + nf.val` etc. This is the ingredient the loop lift actually
+    needs: after the loop's FIRST iteration the accumulators are nonzero, so the
+    from-zero `counting_step_replay` (its `nf=nfr=ni=0` special case) cannot by
+    itself be threaded through the whole loop. The proof is the from-zero one
+    with `u32_add_replay` replaced by the arbitrary-base `u32_add_shift`; the
+    control flow / reads / `pos`,`buflen` updates are counter-independent, so
+    the goal's shifted body reduces by exactly the base body's peeled facts. -/
+lemma counting_step_replay_gen
+    (buf : Slice Std.U8) (a b c : Std.U32)
+    (nf nfr ni Nf Nfr Ni : Std.U32) (pos : Std.Usize) (buflen : Std.I32)
+    (hNf : Nf.val = a.val + nf.val)
+    (hNfr : Nfr.val = b.val + nfr.val)
+    (hNi : Ni.val = c.val + ni.val) :
+    (∀ df dfr di pos' buflen',
+        parse_loop0.body buf nf nfr ni pos buflen
+          = ok (ControlFlow.cont (df, dfr, di, pos', buflen')) →
+        a.val + df.val ≤ Std.U32.max →
+        b.val + dfr.val ≤ Std.U32.max →
+        c.val + di.val ≤ Std.U32.max →
+        ∃ sf sfr si,
+          parse_loop0.body buf Nf Nfr Ni pos buflen
+            = ok (ControlFlow.cont (sf, sfr, si, pos', buflen')) ∧
+          sf.val = a.val + df.val ∧ sfr.val = b.val + dfr.val ∧ si.val = c.val + di.val)
+    ∧
+    (∀ df dfr di,
+        parse_loop0.body buf nf nfr ni pos buflen
+          = ok (ControlFlow.done (df, dfr, di)) →
+        a.val + df.val ≤ Std.U32.max →
+        b.val + dfr.val ≤ Std.U32.max →
+        c.val + di.val ≤ Std.U32.max →
+        ∃ sf sfr si,
+          parse_loop0.body buf Nf Nfr Ni pos buflen
+            = ok (ControlFlow.done (sf, sfr, si)) ∧
+          sf.val = a.val + df.val ∧ sfr.val = b.val + dfr.val ∧ si.val = c.val + di.val) := by
+  refine ⟨?cont, ?done⟩
+  case cont =>
+    intro df dfr di pos' buflen' h0 hoa hob hoc
+    simp only [parse_loop0.body] at h0 ⊢
+    by_cases hbl : buflen > 2#i32
+    · rw [if_pos hbl] at h0; simp only [if_pos hbl] at ⊢
+      obtain ⟨i, hi, h0⟩ := res_bind_eq_ok h0; simp only [hi, bind_tc_ok] at ⊢
+      obtain ⟨i1, hi1, h0⟩ := res_bind_eq_ok h0; simp only [hi1, bind_tc_ok] at ⊢
+      by_cases hcs : i1 = USB_DT_CS_INTERFACE
+      · rw [if_pos hcs] at h0; simp only [if_pos hcs] at ⊢
+        obtain ⟨i2, hi2, h0⟩ := res_bind_eq_ok h0; simp only [hi2, bind_tc_ok] at ⊢
+        obtain ⟨i3, hi3, h0⟩ := res_bind_eq_ok h0; simp only [hi3, bind_tc_ok] at ⊢
+        split at h0
+        all_goals
+          (obtain ⟨⟨mf, mfr, mi⟩, hM0, h0⟩ := res_bind_eq_ok h0
+           obtain ⟨i4, hi4, h0⟩ := res_bind_eq_ok h0
+           obtain ⟨i5, hi5, h0⟩ := res_bind_eq_ok h0
+           obtain ⟨tbl, htbl, h0⟩ := res_bind_eq_ok h0
+           obtain ⟨i6, hi6, h0⟩ := res_bind_eq_ok h0
+           obtain ⟨tpos, htpos, h0⟩ := res_bind_eq_ok h0
+           simp only [ok.injEq, ControlFlow.cont.injEq, Prod.mk.injEq] at h0
+           obtain ⟨rfl, rfl, rfl, rfl, rfl⟩ := h0)
+        case h_1 | h_2 | h_3 =>            -- nformats += 1
+          obtain ⟨z, hz, hM0⟩ := res_bind_eq_ok hM0
+          simp only [ok.injEq, Prod.mk.injEq] at hM0
+          obtain ⟨rfl, rfl, rfl⟩ := hM0
+          obtain ⟨w, hw, hwv⟩ := u32_add_shift nf a 1#u32 z Nf hz hNf hoa
+          exact ⟨w, Nfr, Ni, by simp [hw, hi4, hi5, htbl, hi6, htpos, bind_tc_ok],
+                 hwv, by scalar_tac, by scalar_tac⟩
+        case h_4 =>                        -- DV: all three += 1
+          obtain ⟨z1, hz1, hM0⟩ := res_bind_eq_ok hM0
+          obtain ⟨z2, hz2, hM0⟩ := res_bind_eq_ok hM0
+          obtain ⟨z3, hz3, hM0⟩ := res_bind_eq_ok hM0
+          simp only [ok.injEq, Prod.mk.injEq] at hM0
+          obtain ⟨rfl, rfl, rfl⟩ := hM0
+          obtain ⟨w1, hw1, hwv1⟩ := u32_add_shift nf a 1#u32 z1 Nf hz1 hNf hoa
+          obtain ⟨w2, hw2, hwv2⟩ := u32_add_shift nfr b 1#u32 z2 Nfr hz2 hNfr hob
+          obtain ⟨w3, hw3, hwv3⟩ := u32_add_shift ni c 1#u32 z3 Ni hz3 hNi hoc
+          exact ⟨w1, w2, w3,
+                 by simp [hw1, hw2, hw3, hi4, hi5, htbl, hi6, htpos, bind_tc_ok],
+                 hwv1, hwv2, hwv3⟩
+        case h_5 | h_6 | h_10 =>           -- unchanged counters
+          simp only [ok.injEq, Prod.mk.injEq] at hM0
+          obtain ⟨rfl, rfl, rfl⟩ := hM0
+          exact ⟨Nf, Nfr, Ni, by simp [hi4, hi5, htbl, hi6, htpos, bind_tc_ok],
+                 by scalar_tac, by scalar_tac, by scalar_tac⟩
+        case h_7 | h_8 =>                  -- frame, interval byte at offset 25
+          obtain ⟨z1, hz1, hM0⟩ := res_bind_eq_ok hM0
+          obtain ⟨z4, hz4, hM0⟩ := res_bind_eq_ok hM0
+          simp only [ok.injEq, Prod.mk.injEq] at hM0
+          obtain ⟨rfl, rfl, rfl⟩ := hM0
+          obtain ⟨w2, hw2, hwv2⟩ := u32_add_shift nfr b 1#u32 z1 Nfr hz1 hNfr hob
+          by_cases hb25 : buflen > 25#i32
+          · rw [if_pos hb25] at hz4
+            obtain ⟨j5, hj5, hz4⟩ := res_bind_eq_ok hz4
+            obtain ⟨j6, hj6, hz4⟩ := res_bind_eq_ok hz4
+            obtain ⟨j7, hj7, hz4⟩ := res_bind_eq_ok hz4
+            obtain ⟨w3, hw3, hwv3⟩ := u32_add_shift ni c j7 z4 Ni hz4 hNi hoc
+            refine ⟨Nf, w2, w3, ?_, by scalar_tac, hwv2, hwv3⟩
+            simp only [hj6, bind_tc_ok] at hj7
+            simp only [hw2, if_pos hb25, hj5, hj6, hj7, hw3, hi4, hi5, htbl,
+              hi6, htpos, bind_tc_ok] <;> rfl
+          · rw [if_neg hb25] at hz4
+            simp only [ok.injEq] at hz4; subst hz4
+            refine ⟨Nf, w2, Ni, ?_, by scalar_tac, hwv2, by scalar_tac⟩
+            simp only [hw2, if_neg hb25, hi4, hi5, htbl, hi6, htpos, bind_tc_ok] <;> rfl
+        case h_9 =>                        -- frame, interval byte at offset 21
+          obtain ⟨z1, hz1, hM0⟩ := res_bind_eq_ok hM0
+          obtain ⟨z4, hz4, hM0⟩ := res_bind_eq_ok hM0
+          simp only [ok.injEq, Prod.mk.injEq] at hM0
+          obtain ⟨rfl, rfl, rfl⟩ := hM0
+          obtain ⟨w2, hw2, hwv2⟩ := u32_add_shift nfr b 1#u32 z1 Nfr hz1 hNfr hob
+          by_cases hb21 : buflen > 21#i32
+          · rw [if_pos hb21] at hz4
+            obtain ⟨j5, hj5, hz4⟩ := res_bind_eq_ok hz4
+            obtain ⟨j6, hj6, hz4⟩ := res_bind_eq_ok hz4
+            obtain ⟨j7, hj7, hz4⟩ := res_bind_eq_ok hz4
+            obtain ⟨w3, hw3, hwv3⟩ := u32_add_shift ni c j7 z4 Ni hz4 hNi hoc
+            refine ⟨Nf, w2, w3, ?_, by scalar_tac, hwv2, hwv3⟩
+            simp only [hj6, bind_tc_ok] at hj7
+            simp only [hw2, if_pos hb21, hj5, hj6, hj7, hw3, hi4, hi5, htbl,
+              hi6, htpos, bind_tc_ok] <;> rfl
+          · rw [if_neg hb21] at hz4
+            simp only [ok.injEq] at hz4; subst hz4
+            refine ⟨Nf, w2, Ni, ?_, by scalar_tac, hwv2, by scalar_tac⟩
+            simp only [hw2, if_neg hb21, hi4, hi5, htbl, hi6, htpos, bind_tc_ok] <;> rfl
+      · rw [if_neg hcs] at h0; simp at h0
+    · rw [if_neg hbl] at h0; simp at h0
+  case done =>
+    intro df dfr di h0 hoa hob hoc
+    simp only [parse_loop0.body] at h0 ⊢
+    by_cases hbl : buflen > 2#i32
+    · rw [if_pos hbl] at h0; simp only [if_pos hbl] at ⊢
+      obtain ⟨i, hi, h0⟩ := res_bind_eq_ok h0; simp only [hi, bind_tc_ok] at ⊢
+      obtain ⟨i1, hi1, h0⟩ := res_bind_eq_ok h0; simp only [hi1, bind_tc_ok] at ⊢
+      by_cases hcs : i1 = USB_DT_CS_INTERFACE
+      · rw [if_pos hcs] at h0
+        exfalso
+        obtain ⟨_, _, h0⟩ := res_bind_eq_ok h0
+        obtain ⟨_, _, h0⟩ := res_bind_eq_ok h0
+        obtain ⟨_, _, h0⟩ := res_bind_eq_ok h0
+        obtain ⟨_, _, h0⟩ := res_bind_eq_ok h0
+        obtain ⟨_, _, h0⟩ := res_bind_eq_ok h0
+        obtain ⟨_, _, h0⟩ := res_bind_eq_ok h0
+        obtain ⟨_, _, h0⟩ := res_bind_eq_ok h0
+        obtain ⟨_, _, h0⟩ := res_bind_eq_ok h0
+        simp at h0
+      · rw [if_neg hcs] at h0; simp only [if_neg hcs] at ⊢
+        simp only [ok.injEq, ControlFlow.done.injEq, Prod.mk.injEq] at h0
+        obtain ⟨e1, e2, e3⟩ := h0; subst e1; subst e2; subst e3
+        exact ⟨Nf, Nfr, Ni, rfl, by scalar_tac, by scalar_tac, by scalar_tac⟩
+    · rw [if_neg hbl] at h0; simp only [if_neg hbl] at ⊢
+      simp only [ok.injEq, ControlFlow.done.injEq, Prod.mk.injEq] at h0
+      obtain ⟨e1, e2, e3⟩ := h0; subst e1; subst e2; subst e3
+      exact ⟨Nf, Nfr, Ni, rfl, by scalar_tac, by scalar_tac, by scalar_tac⟩
+
 /-- (Aleph decomposition, 3/3) General replay. `parse_loop0` from `(a,b,c)`
     follows the same control path as from `(0,0,0)` and returns the from-zero
     counters shifted by `(a,b,c)`, under the no-overflow bounds `ha`/`hb`/`hc`.
@@ -570,7 +769,77 @@ lemma counting_replay
       s0.val = a.val + nf0.val ∧
       s1.val = b.val + nfr0.val ∧
       s2.val = c.val + ni0.val := by
-  sorry
+  rw [parse_loop0_eq] at hbase ⊢
+  refine loop_ok_inv
+    (fun (x : Std.U32 × Std.U32 × Std.U32 × Std.Usize × Std.I32) =>
+      parse_loop0.body buf x.1 x.2.1 x.2.2.1 x.2.2.2.1 x.2.2.2.2)
+    -- INVARIANT: from a from-zero state `st = (nf,nfr,ni,p,bl)` there exist
+    -- shifted counters `(Nf,Nfr,Ni) = (a,b,c) + (nf,nfr,ni)` such that the
+    -- ORIGINAL shifted run equals the shifted run advanced to here, and the
+    -- from-zero run from here still reaches the final `(nf0,nfr0,ni0)`.
+    (fun st => ∃ (Nf Nfr Ni : Std.U32),
+        Nf.val = a.val + st.1.val ∧ Nfr.val = b.val + st.2.1.val ∧
+        Ni.val = c.val + st.2.2.1.val ∧
+        loop (fun x => parse_loop0.body buf x.1 x.2.1 x.2.2.1 x.2.2.2.1 x.2.2.2.2)
+            (a, b, c, pos, buflen)
+          = loop (fun x => parse_loop0.body buf x.1 x.2.1 x.2.2.1 x.2.2.2.1 x.2.2.2.2)
+            (Nf, Nfr, Ni, st.2.2.2.1, st.2.2.2.2) ∧
+        loop (fun x => parse_loop0.body buf x.1 x.2.1 x.2.2.1 x.2.2.2.1 x.2.2.2.2) st
+          = ok (nf0, nfr0, ni0))
+    (fun y => ∃ s0 s1 s2,
+        loop (fun x => parse_loop0.body buf x.1 x.2.1 x.2.2.1 x.2.2.2.1 x.2.2.2.2)
+            (a, b, c, pos, buflen)
+          = ok (s0, s1, s2) ∧
+        s0.val = a.val + y.1.val ∧ s1.val = b.val + y.2.1.val ∧
+        s2.val = c.val + y.2.2.val)
+    ?hcont ?hdone (0#u32, 0#u32, 0#u32, pos, buflen) (nf0, nfr0, ni0) ?hinv0 hbase
+  case hinv0 =>
+    exact ⟨a, b, c, by simp, by simp, by simp, rfl, hbase⟩
+  case hcont =>
+    intro x x' hinv hstep
+    obtain ⟨nf, nfr, ni, p, bl⟩ := x
+    obtain ⟨nf', nfr', ni', p', bl'⟩ := x'
+    obtain ⟨Nf, Nfr, Ni, hNf, hNfr, hNi, hshift, hanchor⟩ := hinv
+    have hstep' : parse_loop0.body buf nf nfr ni p bl
+        = ok (ControlFlow.cont (nf', nfr', ni', p', bl')) := hstep
+    have hanchor' :
+        loop (fun x => parse_loop0.body buf x.1 x.2.1 x.2.2.1 x.2.2.2.1 x.2.2.2.2)
+          (nf', nfr', ni', p', bl') = ok (nf0, nfr0, ni0) := by
+      rw [← loop_step_cont _ (nf, nfr, ni, p, bl) (nf', nfr', ni', p', bl') hstep']
+      exact hanchor
+    have hpl : parse_loop0 buf nf' nfr' ni' p' bl' = ok (nf0, nfr0, ni0) := by
+      rw [parse_loop0_eq]; exact hanchor'
+    obtain ⟨hm1, hm2, hm3⟩ :=
+      counting_monotone buf nf' nfr' ni' p' bl' nf0 nfr0 ni0 hpl
+    obtain ⟨sf, sfr, si, hstepS, hsf, hsfr, hsi⟩ :=
+      (counting_step_replay_gen buf a b c nf nfr ni Nf Nfr Ni p bl hNf hNfr hNi).1
+        nf' nfr' ni' p' bl' hstep' (by omega) (by omega) (by omega)
+    refine ⟨sf, sfr, si, hsf, hsfr, hsi, ?_, hanchor'⟩
+    exact hshift.trans
+      (loop_step_cont _ (Nf, Nfr, Ni, p, bl) (sf, sfr, si, p', bl') hstepS)
+  case hdone =>
+    intro x y hinv hstep
+    obtain ⟨nf, nfr, ni, p, bl⟩ := x
+    obtain ⟨f, fr, i⟩ := y
+    obtain ⟨Nf, Nfr, Ni, hNf, hNfr, hNi, hshift, hanchor⟩ := hinv
+    have hstep' : parse_loop0.body buf nf nfr ni p bl
+        = ok (ControlFlow.done (f, fr, i)) := hstep
+    have hfd : ok (f, fr, i)
+        = (ok (nf0, nfr0, ni0) : Result (Std.U32 × Std.U32 × Std.U32)) := by
+      rw [← loop_step_done
+        (fun x => parse_loop0.body buf x.1 x.2.1 x.2.2.1 x.2.2.2.1 x.2.2.2.2)
+        (nf, nfr, ni, p, bl) (f, fr, i) hstep']
+      exact hanchor
+    simp only [ok.injEq, Prod.mk.injEq] at hfd
+    obtain ⟨rfl, rfl, rfl⟩ := hfd
+    obtain ⟨sf, sfr, si, hstepS, hsf, hsfr, hsi⟩ :=
+      (counting_step_replay_gen buf a b c nf nfr ni Nf Nfr Ni p bl hNf hNfr hNi).2
+        f fr i hstep' ha hb hc
+    refine ⟨sf, sfr, si, ?_, hsf, hsfr, hsi⟩
+    rw [hshift]
+    exact loop_step_done
+      (fun x => parse_loop0.body buf x.1 x.2.1 x.2.2.1 x.2.2.2.1 x.2.2.2.2)
+      (Nf, Nfr, Ni, p, bl) (sf, sfr, si) hstepS
 
 /-- Additivity of the counting pass in its accumulators. In `parse_loop0.body`
     the three accumulators (`nformats`/`nframes`/`nintervals`) are used ONLY as
@@ -733,10 +1002,15 @@ end NoPanic
 #print axioms NoPanic.clamp_u32_no_panic
 #print axioms NoPanic.parse_total_safety
 #print axioms NoPanic.u32_add_ge_left
+#print axioms NoPanic.u32_add_shift
 #print axioms NoPanic.res_bind_eq_ok
 #print axioms NoPanic.loop_ok_inv
+#print axioms NoPanic.loop_step_cont
+#print axioms NoPanic.loop_step_done
+#print axioms NoPanic.parse_loop0_eq
 #print axioms NoPanic.parse_no_div
 #print axioms NoPanic.counting_step_replay
+#print axioms NoPanic.counting_step_replay_gen
 #print axioms NoPanic.counting_monotone
 #print axioms NoPanic.counting_replay
 #print axioms NoPanic.counting_additive
