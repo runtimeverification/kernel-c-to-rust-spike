@@ -884,10 +884,11 @@ lemma counting_additive
       s0.val = a.val + nf0.val ∧
       s1.val = b.val + nfr0.val ∧
       s2.val = c.val + ni0.val := by
-  -- Direct specialization of `counting_replay` (identical statement); once the
-  -- decomposition (1)-(3) above is proved this body becomes:
-  --   exact counting_replay buf a b c pos buflen nf0 nfr0 ni0 hbase ha hb hc
-  sorry
+  -- Direct specialization of `counting_replay` (identical statement): the
+  -- whole-loop shifted replay, whose per-step overflow checks are discharged by
+  -- `counting_monotone` from the final-sum bounds `ha`/`hb`/`hc`. No base-case
+  -- special handling is needed (`a=b=c=0` is just the trivial shift).
+  exact counting_replay buf a b c pos buflen nf0 nfr0 ni0 hbase ha hb hc
 
 /-- (2) Frame-loop invariant — THE WORKHORSE (in-bounds writes, internal
     cursors), strengthened to be directly chainable as the induction step of the
