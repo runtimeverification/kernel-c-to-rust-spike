@@ -11,16 +11,32 @@ A contribution here is judged by the assurance it carries, not by lines of code:
 a rewrite is only useful once it passes differential fuzzing against the original
 C, and a proof is only counted once `#print axioms` shows it `sorryAx`-free.
 
-## Verification (this target)
+## Verification (this target): the four walk-invariant lemmas
 
-- **`parse_no_div`** — prove the UVC parser's loops terminate (div-freeness) under
-  `WellFormed`. The `loop_ok_inv` principle in `verify/lean/NoPanic.lean` is the
-  intended tool. Well-scoped; the counting block it can lean on is already proved.
-- **`frame_loop_invariant`** — prove every frame/interval write lands inside the
-  allocated `Vec`, consuming the proved `counting_*` lemmas. This is the
-  in-bounds-writes half of the CVE-2024-53104 property.
-- **Assemble theorem (A)** — once the two above land, compose (A) from
-  termination + in-bounds reads (`WellFormed`) + sized writes + no-overflow.
+The counting invariant, the two loop-reasoning principles (`loop_ok_inv`,
+`loop_no_div`), and div-freeness for the 5 structurally-terminating loops are
+already proved. What remains for theorem (A) reduces to four stated lemmas in
+`verify/lean/NoPanic.lean`, each currently `sorry`. They are the positional-walk
+functional-correctness core, and they are independent enough to be taken
+separately.
+
+- **`descriptor_walk_step`** — at each visited position, `buf[pos]` is the
+  descriptor `bLength >= 1`, and stepping by it lands on the next boundary within
+  the buffer. Discharges `parse_loop0`'s termination (via `loop_no_div`) and its
+  in-bounds reads.
+- **`uvc_parse_frame_walk`** — a successful `uvc_parse_frame` consumes `ret >= 1`
+  bytes and lands on a descriptor boundary. Feeds the `uvc_parse_format_loop0..3`
+  terminations.
+- **`uvc_parse_format_walk`** — the same for `uvc_parse_format`: `ret` equals the
+  bytes consumed, landing on a boundary. Feeds `parse_loop1`'s termination and
+  `frame_loop_invariant`'s room re-establishment.
+- **`format_writes_le_count`** — the writes are a subset of what the counting
+  pass tallied over the consumed block (the CVE-2024-53104 conjunct). Feeds
+  `frame_loop_invariant` and the final (A) write-bounds.
+
+Proving these unblocks `parse_no_div`, `frame_loop_invariant`, and the assembly
+of (A), which are already stated to consume them. The reusable `loop_no_div` /
+`loop_ok_inv` principles and the `*_ne_div` toolkit are the tools.
 
 ## New rewrite targets
 

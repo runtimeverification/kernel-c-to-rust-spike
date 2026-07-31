@@ -328,6 +328,399 @@ theorem loop_step_done {α β : Type} (body : α → Result (ControlFlow α β))
     (x : α) (y : β) (h : body x = ok (ControlFlow.done y)) :
     loop body x = ok y := by rw [loop.eq_def, h]
 
+/-- Div-freeness (termination) principle for Aeneas' `loop` — the counterpart of
+    `loop_ok_inv`, but for ruling out `div` instead of establishing a
+    postcondition. If every reachable body step is itself div-free (`hbody`) and,
+    on a `cont` step, strictly decreases a `Nat` measure while preserving the
+    invariant (`hstep`), then the whole loop never returns `div`.
+
+    Unlike `loop_ok_inv`, this is NOT a `fixpoint_induct` argument: the predicate
+    `· ≠ div` is FALSE at the `div` bottom, so it is not admissible and partial
+    correctness cannot deliver it. Termination must be supplied by the measure —
+    here via well-founded (strong) induction on `measure x : Nat`. `fail` is left
+    unconstrained: this rules out `div` only, exactly the div-freeness half of a
+    no-panic proof (the `fail` half is separate). -/
+theorem loop_no_div {α β : Type} (body : α → Result (ControlFlow α β))
+    (measure : α → Nat) (inv : α → Prop)
+    (hbody : ∀ x, inv x → body x ≠ div)
+    (hstep : ∀ x x', inv x → body x = ok (ControlFlow.cont x') →
+        inv x' ∧ measure x' < measure x)
+    (x : α) (hinv : inv x) : loop body x ≠ div := by
+  suffices H : ∀ n x, measure x = n → inv x → loop body x ≠ div from
+    H (measure x) x rfl hinv
+  intro n
+  induction n using Nat.strong_induction_on with
+  | _ n ih =>
+    intro x hmx hix
+    rw [loop.eq_def]
+    cases hb : body x with
+    | ok r =>
+      cases r with
+      | cont x' =>
+        obtain ⟨hix', hlt⟩ := hstep x x' hix hb
+        subst hmx
+        simpa using ih (measure x') hlt x' rfl hix'
+      | done y => simp
+    | fail e => simp
+    | div => exact absurd hb (hbody x hix)
+
+-- ── Div-freeness toolkit: primitives never return `div`, and `div` propagates
+--    only through `bind` from a diverging sub-term. These let a loop BODY (which
+--    contains no nested `loop` for the structural loops) be shown `≠ div` by a
+--    finite bind-peel. Reused across every structural-loop `hbody`. ──
+
+theorem ok_ne_div' {α} (v : α) : (ok v : Result α) ≠ div := by simp
+theorem fail_ne_div' {α} (e : Error) : (fail e : Result α) ≠ div := by simp
+/-- `Result.ofOption` is always `ok`/`fail` — the shape of every checked scalar
+    op (`+`,`-`,`*`,`<<<`, casts via `tryMk`/`ofOption`). -/
+theorem ofOption_ne_div {α} (o : Option α) (e : Error) :
+    Result.ofOption o e ≠ div := by cases o <;> simp [Result.ofOption]
+/-- Checked `Usize` subtraction is `fail`/`ok` (not `ofOption`-shaped), so it
+    needs its own div-freeness fact. -/
+theorem usize_sub_ne_div (x y : Std.Usize) : (x - y) ≠ div := by
+  show UScalar.sub x y ≠ div; unfold UScalar.sub; split <;> simp
+/-- `div` in a bind comes only from a diverging head or tail. -/
+theorem bind_ne_div {α β} {x : Result α} {f : α → Result β}
+    (hx : x ≠ div) (hf : ∀ v, f v ≠ div) : (x >>= f) ≠ div := by
+  cases x <;> simp_all
+/-- Total correctness (`spec`) forbids `div` (`theta div = False`). -/
+theorem spec_ne_div {α} {x : Result α} {p} (h : WP.spec x p) : x ≠ div := by
+  intro hd; rw [hd] at h; exact h
+theorem array_index_ne_div {α n} (a : Array α n) (j : Std.Usize) :
+    Array.index_usize a j ≠ div := by unfold Array.index_usize; split <;> simp
+theorem slice_index_ne_div {α} (b : Slice α) (j : Std.Usize) :
+    Slice.index_usize b j ≠ div := by unfold Slice.index_usize; split <;> simp
+theorem array_update_ne_div {α n} (a : Array α n) (i : Std.Usize) (x : α) :
+    Array.update a i x ≠ div := by unfold Array.update; split <;> simp
+theorem vec_index_ne_div {T} (v : alloc.vec.Vec T) (i : Std.Usize) :
+    alloc.vec.Vec.index (core.slice.index.SliceIndexUsizeSlice T) v i ≠ div := by
+  unfold alloc.vec.Vec.index; simp only []; exact slice_index_ne_div _ _
+theorem slice_index_mut_ne_div {α} (v : Slice α) (i : Std.Usize) :
+    Slice.index_mut_usize v i ≠ div := by
+  unfold Slice.index_mut_usize
+  exact bind_ne_div (slice_index_ne_div _ _) (fun _ => ok_ne_div' _)
+theorem vec_index_mut_ne_div {T} (v : alloc.vec.Vec T) (i : Std.Usize) :
+    alloc.vec.Vec.index_mut (core.slice.index.SliceIndexUsizeSlice T) v i ≠ div := by
+  unfold alloc.vec.Vec.index_mut; simp only []
+  unfold core.slice.index.Usize.index_mut
+  exact slice_index_mut_ne_div _ _
+/-- The Range iterator's `next` never diverges (its total spec forbids it). -/
+theorem iter_next_ne_div (it : core.ops.range.Range Std.Usize) :
+    core.iter.range.IteratorRange.next core.iter.range.StepUsize it ≠ div :=
+  spec_ne_div (core.iter.range.IteratorRange.next_UScalar_spec
+    (ty := .Usize) (cloneInst := core.clone.CloneUsize)
+    (partialOrdInst := core.cmp.PartialOrdUsize) (fun _ => rfl) (fun _ _ => rfl) it)
+
+/-- Head-of-bind div-freeness discharger: tries each primitive fact. `exact` uses
+    full transparency so `ofOption_ne_div` also matches scalar ops/casts/shifts. -/
+macro "hd_ne_div" : tactic => `(tactic| first
+  | exact ok_ne_div' _ | exact fail_ne_div' _
+  | exact array_index_ne_div _ _ | exact slice_index_ne_div _ _
+  | exact array_update_ne_div _ _ _ | exact vec_index_ne_div _ _
+  | exact vec_index_mut_ne_div _ _ | exact iter_next_ne_div _
+  | exact ofOption_ne_div _ _)
+
+/-- `le32` (4 little-endian byte reads + shifts/ors) never diverges. -/
+theorem le32_ne_div (buf : Slice Std.U8) (at1 : Std.Usize) : le32 buf at1 ≠ div := by
+  unfold le32
+  repeat' refine bind_ne_div (by hd_ne_div) (fun _ => ?_)
+  hd_ne_div
+
+/-- Range `next` on a `cont` step: `some` forces `start < end` and advances
+    `start` by one, leaving `end` fixed — the strict decrease of `end - start`. -/
+theorem range_next_some (iter iterN : core.ops.range.Range Std.Usize)
+    (o : Option Std.Usize) (i : Std.Usize)
+    (hnext : core.iter.range.IteratorRange.next core.iter.range.StepUsize iter
+        = ok (o, iterN))
+    (ho : o = some i) :
+    iter.start.val < iter.end.val ∧ iterN.start.val = iter.start.val + 1
+      ∧ iterN.end = iter.end := by
+  have hspec := core.iter.range.IteratorRange.next_UScalar_spec
+    (ty := .Usize) (cloneInst := core.clone.CloneUsize)
+    (partialOrdInst := core.cmp.PartialOrdUsize) (fun _ => rfl) (fun _ _ => rfl) iter
+  rw [hnext, WP.spec_ok] at hspec
+  simp only [WP.uncurry'] at hspec
+  obtain ⟨hif, hend⟩ := hspec
+  by_cases hlt : iter.start.val < iter.end.val
+  · simp only [hlt, if_true] at hif; exact ⟨hlt, hif.2, hend⟩
+  · simp only [hlt, if_false] at hif; rw [ho] at hif; exact absurd hif.1 (by simp)
+
+-- ── Structural-loop div-freeness (measure = remaining Range/index count). Each
+--    consumed by `parse_no_div` for the loops that terminate independently of the
+--    descriptor walk. The buffer-walk loops (`parse_loop0`, `parse_loop1`,
+--    `uvc_parse_format_loop0..3`) are handled separately via the walk invariant. ──
+
+/-- GUID 16-byte compare loop: terminates on `16 - j`. -/
+theorem guid_eq16_loop_no_div (a : Array Std.U8 16#usize) (b : Slice Std.U8)
+    (j : Std.Usize) (m : Bool) : guid_eq16_loop a b j m ≠ div := by
+  unfold guid_eq16_loop
+  apply loop_no_div _ (fun st => 16 - st.1.val) (fun _ => True) ?_ ?_ _ trivial
+  · rintro ⟨j, m⟩ _
+    simp only [guid_eq16_loop.body]
+    split
+    · refine bind_ne_div (by hd_ne_div) (fun _ => ?_)
+      refine bind_ne_div (by hd_ne_div) (fun _ => ?_)
+      refine bind_ne_div (by split <;> hd_ne_div) (fun _ => ?_)
+      refine bind_ne_div (by hd_ne_div) (fun _ => ?_)
+      hd_ne_div
+    · hd_ne_div
+  · rintro ⟨j, m⟩ ⟨j', m'⟩ _ hstep
+    simp only [guid_eq16_loop.body] at hstep
+    by_cases hj : j < 16#usize
+    · rw [if_pos hj] at hstep
+      obtain ⟨_, _, hstep⟩ := res_bind_eq_ok hstep
+      obtain ⟨_, _, hstep⟩ := res_bind_eq_ok hstep
+      obtain ⟨_, _, hstep⟩ := res_bind_eq_ok hstep
+      obtain ⟨j1, hj1, hstep⟩ := res_bind_eq_ok hstep
+      simp only [ok.injEq, ControlFlow.cont.injEq, Prod.mk.injEq] at hstep
+      obtain ⟨rfl, rfl⟩ := hstep
+      refine ⟨trivial, ?_⟩
+      have hv : j1.val = j.val + 1 := by
+        have e := UScalar.add_equiv j 1#usize; rw [hj1] at e
+        obtain ⟨-, hv, -⟩ := e; scalar_tac
+      have hjv : j.val < 16 := by scalar_tac
+      show 16 - j1.val < 16 - j.val
+      omega
+    · rw [if_neg hj] at hstep; simp at hstep
+
+/-- `parse` serialization loop 3 (copy frames into the output array): terminates
+    on the `Range` measure `end - start`. -/
+theorem parse_loop3_no_div (v : alloc.vec.Vec UvcFrame)
+    (iter : core.ops.range.Range Std.Usize) (a : Array UvcFrameOut 256#usize) :
+    parse_loop3 iter a v ≠ div := by
+  unfold parse_loop3
+  apply loop_no_div _ (fun st => st.1.end.val - st.1.start.val) (fun _ => True) ?_ ?_ _ trivial
+  · rintro ⟨it, ar⟩ _
+    simp only [parse_loop3.body]
+    refine bind_ne_div (by hd_ne_div) (fun p => ?_)
+    obtain ⟨o, iter1⟩ := p
+    cases o with
+    | none => hd_ne_div
+    | some i =>
+      refine bind_ne_div (by hd_ne_div) (fun _ => ?_)
+      refine bind_ne_div (by hd_ne_div) (fun _ => ?_); hd_ne_div
+  · rintro ⟨it, ar⟩ ⟨it', ar'⟩ _ hstep
+    simp only [parse_loop3.body] at hstep
+    obtain ⟨⟨o, itN⟩, hnext, hstep⟩ := res_bind_eq_ok hstep
+    match ho : o with
+    | none => exact absurd hstep (by simp)
+    | some i =>
+      obtain ⟨hlt, hs, he⟩ := range_next_some it itN _ i hnext rfl
+      obtain ⟨_, _, hstep⟩ := res_bind_eq_ok hstep
+      obtain ⟨_, _, hstep⟩ := res_bind_eq_ok hstep
+      simp only [ok.injEq, ControlFlow.cont.injEq, Prod.mk.injEq] at hstep
+      obtain ⟨rfl, rfl⟩ := hstep
+      refine ⟨trivial, ?_⟩
+      have he' : itN.end.val = it.end.val := by rw [he]
+      show itN.end.val - itN.start.val < it.end.val - it.start.val
+      scalar_tac
+
+/-- Frame interval-copy loop: terminates on the `Range` measure `end - start`
+    (independent of the buffer walk). -/
+theorem uvc_parse_frame_loop_no_div (iter : core.ops.range.Range Std.Usize)
+    (v : alloc.vec.Vec Std.U32) (iv_base : Std.Usize) (buf : Slice Std.U8)
+    (pos : Std.Usize) : ParseState.uvc_parse_frame_loop iter v iv_base buf pos ≠ div := by
+  unfold ParseState.uvc_parse_frame_loop
+  apply loop_no_div _ (fun st => st.1.end.val - st.1.start.val) (fun _ => True) ?_ ?_ _ trivial
+  · rintro ⟨it, vv⟩ _
+    simp only [ParseState.uvc_parse_frame_loop.body]
+    refine bind_ne_div (by hd_ne_div) (fun p => ?_)
+    obtain ⟨o, iter1⟩ := p
+    cases o with
+    | none => hd_ne_div
+    | some i =>
+      refine bind_ne_div (by hd_ne_div) (fun _ => ?_)
+      refine bind_ne_div (by hd_ne_div) (fun _ => ?_)
+      refine bind_ne_div (by hd_ne_div) (fun _ => ?_)
+      refine bind_ne_div (by exact le32_ne_div _ _) (fun _ => ?_)
+      refine bind_ne_div (by split <;> hd_ne_div) (fun _ => ?_)
+      refine bind_ne_div (by hd_ne_div) (fun _ => ?_)
+      refine bind_ne_div (by hd_ne_div) (fun _ => ?_)
+      hd_ne_div
+  · rintro ⟨it, vv⟩ ⟨it', vv'⟩ _ hstep
+    simp only [ParseState.uvc_parse_frame_loop.body] at hstep
+    obtain ⟨⟨o, itN⟩, hnext, hstep⟩ := res_bind_eq_ok hstep
+    match ho : o with
+    | none => exact absurd hstep (by simp)
+    | some i =>
+      obtain ⟨hlt, hs, he⟩ := range_next_some it itN _ i hnext rfl
+      obtain ⟨_, _, hstep⟩ := res_bind_eq_ok hstep   -- pos + 26
+      obtain ⟨_, _, hstep⟩ := res_bind_eq_ok hstep   -- 4 * i
+      obtain ⟨_, _, hstep⟩ := res_bind_eq_ok hstep   -- i1 + i2
+      obtain ⟨_, _, hstep⟩ := res_bind_eq_ok hstep   -- le32
+      obtain ⟨_, _, hstep⟩ := res_bind_eq_ok hstep   -- interval1 (ite)
+      obtain ⟨_, _, hstep⟩ := res_bind_eq_ok hstep   -- iv_base + i
+      obtain ⟨⟨_, _⟩, _, hstep⟩ := res_bind_eq_ok hstep   -- Vec.index_mut (pair)
+      simp at hstep   -- reduce the index_mut pattern-let and inject cont/pair
+      obtain ⟨rfl, _⟩ := hstep
+      refine ⟨trivial, ?_⟩
+      have he' : itN.end.val = it.end.val := by rw [he]
+      show itN.end.val - itN.start.val < it.end.val - it.start.val
+      scalar_tac
+
+/-- The 41-entry `UVC_FMTS` format table is a constant `fourcc`-chain — no loop,
+    hence never `div`. Needed for `uvc_format_by_guid`'s body. -/
+theorem fourcc_ne_div (a b c d : Std.U8) : fourcc a b c d ≠ div := by
+  unfold fourcc
+  repeat' refine bind_ne_div (by hd_ne_div) (fun _ => ?_)
+  hd_ne_div
+theorem UVC_FMTS_ne_div : UVC_FMTS ≠ div := by
+  unfold UVC_FMTS
+  simp only [V4L2_PIX_FMT_BGR24,V4L2_PIX_FMT_CNF4,V4L2_PIX_FMT_GREY,V4L2_PIX_FMT_H264,V4L2_PIX_FMT_HEVC,V4L2_PIX_FMT_INZI,V4L2_PIX_FMT_M420,V4L2_PIX_FMT_MJPEG,V4L2_PIX_FMT_NV12,V4L2_PIX_FMT_P010,V4L2_PIX_FMT_RGB565,V4L2_PIX_FMT_SBGGR16,V4L2_PIX_FMT_SBGGR8,V4L2_PIX_FMT_SGBRG16,V4L2_PIX_FMT_SGBRG8,V4L2_PIX_FMT_SGRBG16,V4L2_PIX_FMT_SGRBG8,V4L2_PIX_FMT_SRGGB10P,V4L2_PIX_FMT_SRGGB16,V4L2_PIX_FMT_SRGGB8,V4L2_PIX_FMT_UYVY,V4L2_PIX_FMT_XBGR32,V4L2_PIX_FMT_Y10,V4L2_PIX_FMT_Y12,V4L2_PIX_FMT_Y12I,V4L2_PIX_FMT_Y16,V4L2_PIX_FMT_Y16I,V4L2_PIX_FMT_Y8I,V4L2_PIX_FMT_YUV420,V4L2_PIX_FMT_YUYV,V4L2_PIX_FMT_YVU420,V4L2_PIX_FMT_Z16]
+  repeat' refine bind_ne_div (by first | exact fourcc_ne_div _ _ _ _ | hd_ne_div) (fun _ => ?_)
+  hd_ne_div
+
+/-- GUID→format table scan: terminates on `41 - i` (the 41-entry `UVC_FMTS`).
+    Its body calls `guid_eq16` (itself a loop), so it consumes
+    `guid_eq16_loop_no_div`. -/
+theorem uvc_format_by_guid_loop_no_div (guid : Slice Std.U8) (i : Std.Usize) :
+    uvc_format_by_guid_loop guid i ≠ div := by
+  unfold uvc_format_by_guid_loop
+  apply loop_no_div _ (fun i => 41 - i.val) (fun _ => True) ?_ ?_ _ trivial
+  · intro i _
+    simp only [uvc_format_by_guid_loop.body]
+    refine bind_ne_div (by exact UVC_FMTS_ne_div) (fun a => ?_)
+    refine bind_ne_div (by hd_ne_div) (fun s => ?_)
+    split
+    · refine bind_ne_div (by hd_ne_div) (fun _ => ?_)
+      refine bind_ne_div (by exact guid_eq16_loop_no_div _ _ _ _) (fun b => ?_)
+      split
+      · hd_ne_div
+      · refine bind_ne_div (by hd_ne_div) (fun _ => ?_); hd_ne_div
+    · hd_ne_div
+  · intro i i' _ hstep
+    simp only [uvc_format_by_guid_loop.body] at hstep
+    obtain ⟨a, ha, hstep⟩ := res_bind_eq_ok hstep
+    obtain ⟨s, hs, hstep⟩ := res_bind_eq_ok hstep
+    by_cases hi : i < Slice.len s
+    · rw [if_pos hi] at hstep
+      obtain ⟨_, _, hstep⟩ := res_bind_eq_ok hstep
+      obtain ⟨b, _, hstep⟩ := res_bind_eq_ok hstep
+      by_cases hbv : b
+      · rw [if_pos hbv] at hstep; simp only [ok.injEq, reduceCtorEq] at hstep
+      · rw [if_neg hbv] at hstep
+        obtain ⟨i2, hi2, hstep⟩ := res_bind_eq_ok hstep
+        simp only [ok.injEq, ControlFlow.cont.injEq] at hstep
+        subst hstep
+        refine ⟨trivial, ?_⟩
+        have hseq : s = Array.to_slice a := by
+          simp only [lift, ok.injEq] at hs; exact hs.symm
+        have hlen : (Slice.len s).val = 41 := by
+          rw [hseq]; simp [Array.to_slice, Slice.len]
+        have hiv : i.val < 41 := by scalar_tac
+        have hv : i2.val = i.val + 1 := by
+          have e := UScalar.add_equiv i 1#usize; rw [hi2] at e
+          obtain ⟨-, hv, -⟩ := e; scalar_tac
+        show 41 - i2.val < 41 - i.val
+        omega
+    · rw [if_neg hi] at hstep; simp only [ok.injEq, reduceCtorEq] at hstep
+
+-- ── Iterator specs for `parse_loop2` (Enumerate(Take(SliceIter))). Aeneas ships
+--    a `Take`/`next` decrease spec only for `ChunksExact`; these supply the
+--    `SliceIter`/`Take`/`Enumerate` facts for the `SliceIter` stack. The measure
+--    is the `Take`'s remaining count `n`, which `Take.next` decrements by one on
+--    every non-empty step — so `SliceIter`'s element behaviour is not needed for
+--    termination, only that the `next`s are div-free. ──
+
+/-- `SliceIter.next` is total (a `dite` of `ok`s): never `div`. -/
+theorem sliceiter_next_ne_div {T} (it : core.slice.iter.Iter T) :
+    core.slice.iter.IteratorSliceIter.next it ≠ div := by
+  unfold core.slice.iter.IteratorSliceIter.next; split <;> exact ok_ne_div' _
+
+/-- `Take.next` is div-free when its inner iterator's `next` is. -/
+theorem take_next_ne_div {I Item} (inst : core.iter.traits.iterator.Iterator I Item)
+    (self : core.iter.adapters.take.Take I) (h_inner : ∀ it, inst.next it ≠ div) :
+    core.iter.adapters.take.IteratorTake.next inst self ≠ div := by
+  unfold core.iter.adapters.take.IteratorTake.next
+  split
+  · exact ok_ne_div' _
+  · refine bind_ne_div (by exact usize_sub_ne_div _ _) (fun _ => ?_)
+    refine bind_ne_div (h_inner _) (fun _ => ?_); exact ok_ne_div' _
+
+/-- On a `some` step, `Take.next` requires `n > 0` and returns a `Take` with
+    `n' = n - 1`: the strict decrease of the `Take` measure. -/
+theorem take_next_some_n {I Item} (inst : core.iter.traits.iterator.Iterator I Item)
+    (self : core.iter.adapters.take.Take I) (a : Item) (iter' : core.iter.adapters.take.Take I)
+    (h : core.iter.adapters.take.IteratorTake.next inst self = ok (some a, iter')) :
+    0 < self.n.val ∧ iter'.n.val = self.n.val - 1 := by
+  unfold core.iter.adapters.take.IteratorTake.next at h
+  by_cases hn : self.n.val = 0
+  · rw [if_pos hn] at h; simp at h
+  · rw [if_neg hn] at h
+    obtain ⟨n', hn', h⟩ := res_bind_eq_ok h
+    obtain ⟨⟨opt, it2⟩, hinner, h⟩ := res_bind_eq_ok h
+    simp only [ok.injEq, Prod.mk.injEq] at h; obtain ⟨_, rfl⟩ := h
+    have hv : n'.val = self.n.val - 1 := by
+      have e := UScalar.sub_equiv self.n 1#usize; rw [hn'] at e; scalar_tac
+    exact ⟨by omega, hv⟩
+
+/-- On a `some` step, `Enumerate.next` delegates to its inner iterator (which also
+    returned `some`) and carries the inner's new state into `self'.iter`. -/
+theorem enum_next_some {I Item} (inst : core.iter.traits.iterator.Iterator I Item)
+    (self : core.iter.adapters.enumerate.Enumerate I) (p : Std.Usize × Item)
+    (self' : core.iter.adapters.enumerate.Enumerate I)
+    (h : core.iter.adapters.enumerate.IteratorEnumerate.next inst self = ok (some p, self')) :
+    ∃ a it', inst.next self.iter = ok (some a, it') ∧ self'.iter = it' := by
+  unfold core.iter.adapters.enumerate.IteratorEnumerate.next at h
+  obtain ⟨⟨opt, it'⟩, hinner, h⟩ := res_bind_eq_ok h
+  cases opt with
+  | none => simp at h
+  | some a =>
+    obtain ⟨_, _, h⟩ := res_bind_eq_ok h
+    simp only [ok.injEq, Prod.mk.injEq] at h; obtain ⟨_, rfl⟩ := h
+    exact ⟨a, it', hinner, rfl⟩
+
+/-- `Enumerate.next` is div-free when its inner iterator's `next` is. -/
+theorem enum_next_ne_div {I Item} (inst : core.iter.traits.iterator.Iterator I Item)
+    (self : core.iter.adapters.enumerate.Enumerate I) (h_inner : ∀ it, inst.next it ≠ div) :
+    core.iter.adapters.enumerate.IteratorEnumerate.next inst self ≠ div := by
+  unfold core.iter.adapters.enumerate.IteratorEnumerate.next
+  refine bind_ne_div (h_inner _) (fun p => ?_)
+  obtain ⟨opt, iter'⟩ := p
+  cases opt with
+  | none => exact ok_ne_div' _
+  | some a => refine bind_ne_div (by exact ofOption_ne_div _ _) (fun _ => ?_); exact ok_ne_div' _
+
+/-- `parse` serialization loop 2 (copy formats into the output array): iterates
+    `Enumerate(Take(SliceIter))`; terminates on the `Take`'s remaining count. -/
+theorem parse_loop2_no_div
+    (iter : core.iter.adapters.enumerate.Enumerate
+      (core.iter.adapters.take.Take (core.slice.iter.Iter UvcFormat)))
+    (a : Array UvcFormatOut 64#usize) : parse_loop2 iter a ≠ div := by
+  unfold parse_loop2
+  apply loop_no_div _ (fun st => st.1.iter.n.val) (fun _ => True) ?_ ?_ _ trivial
+  · rintro ⟨it, ar⟩ _
+    simp only [parse_loop2.body]
+    have hnd : ∀ e, core.iter.adapters.enumerate.IteratorEnumerate.next
+        (core.iter.traits.iterator.IteratorTake
+          (core.iter.traits.iterator.IteratorSliceIter UvcFormat)) e ≠ div :=
+      fun e => enum_next_ne_div _ e
+        (fun t => take_next_ne_div _ t (fun s => sliceiter_next_ne_div s))
+    refine bind_ne_div (hnd _) (fun p => ?_)
+    obtain ⟨o, iter1⟩ := p
+    cases o with
+    | none => exact ok_ne_div' _
+    | some pp =>
+      obtain ⟨i, f⟩ := pp
+      refine bind_ne_div (by hd_ne_div) (fun _ => ?_)
+      refine bind_ne_div (by hd_ne_div) (fun _ => ?_); exact ok_ne_div' _
+  · rintro ⟨it, ar⟩ ⟨it', ar'⟩ _ hstep
+    simp only [parse_loop2.body] at hstep
+    obtain ⟨⟨o, enum2⟩, hnext, hstep⟩ := res_bind_eq_ok hstep
+    match ho : o with
+    | none => exact absurd hstep (by simp)
+    | some p =>
+      obtain ⟨aa, it2, hin, henum⟩ := enum_next_some _ it p enum2 hnext
+      obtain ⟨hpos, hdec⟩ := take_next_some_n _ it.iter aa it2 hin
+      obtain ⟨i, f⟩ := p
+      obtain ⟨_, _, hstep⟩ := res_bind_eq_ok hstep
+      obtain ⟨_, _, hstep⟩ := res_bind_eq_ok hstep
+      simp only [ok.injEq, ControlFlow.cont.injEq, Prod.mk.injEq] at hstep
+      obtain ⟨rfl, rfl⟩ := hstep
+      refine ⟨trivial, ?_⟩
+      show enum2.iter.n.val < it.iter.n.val
+      rw [henum]; omega
+
 /-- `parse_loop0` as a bare `loop` over a projection-style body (defeq to the
     Aeneas-generated pattern-lambda). Lets the loop lemmas above refer to a
     single, syntactically stable body term. -/
@@ -890,6 +1283,158 @@ lemma counting_additive
   -- special handling is needed (`a=b=c=0` is just the trivial shift).
   exact counting_replay buf a b c pos buflen nf0 nfr0 ni0 hbase ha hb hc
 
+-- ════════════════════════════════════════════════════════════════════════
+-- THE DESCRIPTOR-WALK INVARIANT — the shared positional functional-correctness
+-- core of theorem (A). Everything the 6 buffer-walk loops and the write-bounds
+-- proof still need bottoms out here. STATED ONLY (sorry): this is the named,
+-- checkable remaining goal, not prose.
+--
+-- `WellFormed buf` gives a tiling `descs` of `buf` into self-describing blocks,
+-- each with `bLength = block-length ≥ 3 ≥ 1` (byte 0). A *boundary* is a
+-- position equal to the total length of a prefix of `descs`. The claim is that
+-- the parser's `pos`-walk only ever lands on boundaries, never reads out of
+-- range, and advances by a positive whole number of descriptors per step:
+--
+--   • `descriptor_walk_step`  — one counting step (`pos += buf[pos]`):
+--       `buf[pos] = bLength ≥ 1`, lands on the next boundary, stays in `buf`.
+--       CONSUMED BY: `parse_loop0`'s `loop_no_div.hstep` (measure `buflen`
+--       strictly drops since `buf[pos] ≥ 1`) and its guarded in-bounds reads.
+--   • `uvc_parse_frame_walk`   — one frame step (`pos += ret`):
+--       `ret ≥ 1`, `pos+ret` is a boundary in `buf`.
+--       CONSUMED BY: `uvc_parse_format_loop0..3`'s `loop_no_div.hstep`.
+--   • `uvc_parse_format_walk`  — one driving step (`pos += ret`):
+--       `ret ≥ 1`, `pos+ret` is a boundary in `buf` (so `ret` = exact bytes
+--       consumed = a contiguous run of descriptors — this is what makes the
+--       parse walk and the counting walk share ONE tiling, so `counting_additive`
+--       splits at `pos+ret`).
+--       CONSUMED BY: `parse_loop1`'s `loop_no_div.hstep`, AND (via the shared
+--       tiling) `frame_loop_invariant`'s room re-establishment.
+--   • `format_writes_le_count` — conjunct (iii), the write⊆count subset:
+--       the frames/intervals a format WRITES over `[pos, pos+ret)` are ≤ what
+--       `parse_loop0` TALLIES over the same block (same tiling; the parse pass
+--       writes only for `buf[pos+2] == ftype`, a subset of the tallied frame
+--       subtypes — COUNTING_LEMMA_NOTES §2/§4).
+--       CONSUMED BY: `frame_loop_invariant` (LOCAL FIT + room re-establishment)
+--       and thereby the final (A) write-bounds assembly.
+--
+-- Together these are the real shared core: the first three are the positional
+-- structure (boundary + bLength/ret ≥ 1 + in-buf), serving termination and
+-- in-bounds reads; the fourth is the write⊆count relation, serving in-bounds
+-- writes. No single lemma serves all cleanly because the walks step by three
+-- different quantities (`buf[pos]`, frame `ret`, format `ret`) and writes are a
+-- distinct concern from position — but this is the minimal set, and each names
+-- exactly which loop / obligation it discharges.
+-- ════════════════════════════════════════════════════════════════════════
+
+/-- A *descriptor boundary*: `q` (a byte offset into `buf`) is the total length
+    of some prefix `descs.take k` of the tiling. The parser's walk lands only on
+    boundaries; the block occupying `[boundary k, boundary (k+1))` is `descs[k]`. -/
+def AtBoundary (descs : List (List Std.U8)) (q : ℕ) : Prop :=
+  ∃ k, k ≤ descs.length ∧ q = ((descs.take k).flatten).length
+
+/-- (WALK-1, structural) One counting-walk step. `htile`/`hblk`/`hbound` are
+    `WellFormed buf` unpacked at its ∃-witness `descs`. At a non-final boundary
+    `pos` (block index `k`), the guarded length read at `pos` succeeds, equals
+    the block's `bLength`, is `≥ 1`, and stepping by it reaches boundary `k+1`,
+    still within `buf`. This is the fact that makes `parse_loop0`'s `buflen`
+    measure strictly decrease and every `buf[pos+j]` read stay in range. -/
+lemma descriptor_walk_step
+    (buf : Slice Std.U8) (descs : List (List Std.U8))
+    (htile : descs.flatten = buf.val)
+    (hblk : ∀ d ∈ descs, 1 ≤ (d.getD 0 (0#u8)).val ∧
+              (d.getD 0 (0#u8)).val = d.length ∧ 3 ≤ d.length)
+    (hbound : buf.length ≤ 16777216)
+    (pos : Std.Usize) (k : ℕ) (hk : k < descs.length)
+    (hpos : pos.val = ((descs.take k).flatten).length) :
+    ∃ b : Std.U8,
+      Slice.index_usize buf pos = ok b ∧
+      1 ≤ b.val ∧
+      b.val = (descs.getD k []).length ∧
+      pos.val + b.val = ((descs.take (k + 1)).flatten).length ∧
+      pos.val + b.val ≤ buf.length := by
+  sorry
+
+/-- (WALK-2, `uvc_parse_frame`) One frame-walk step. Under the tiling, at a
+    boundary `pos` with the walk in range (`pos + buflen = buf.length`), a
+    successful `uvc_parse_frame` returns `ret ≥ 1` and advances to another
+    boundary still within `buf`. Feeds termination of the frame loops
+    `uvc_parse_format_loop0..3` and their in-bounds reads. -/
+lemma uvc_parse_frame_walk
+    (self : ParseState) (quirks : Std.U32) (fmt : UvcFormat) (frame_idx : Std.Usize)
+    (ftype : Std.U8) (wm : Std.I32)
+    (buf : Slice Std.U8) (descs : List (List Std.U8))
+    (htile : descs.flatten = buf.val)
+    (hblk : ∀ d ∈ descs, 1 ≤ (d.getD 0 (0#u8)).val ∧
+              (d.getD 0 (0#u8)).val = d.length ∧ 3 ≤ d.length)
+    (hbound : buf.length ≤ 16777216)
+    (pos : Std.Usize) (buflen : Std.I32)
+    (hpb : (pos.val : ℤ) + buflen.val = (buf.length : ℤ))
+    (hbdry : AtBoundary descs pos.val)
+    (ret : Std.I32) (st' : ParseState)
+    (hok : ParseState.uvc_parse_frame self quirks fmt frame_idx ftype wm buf pos buflen
+        = ok (ret, st')) :
+    1 ≤ ret.val ∧
+    pos.val + ret.val.toNat ≤ buf.length ∧
+    AtBoundary descs (pos.val + ret.val.toNat) := by
+  sorry
+
+/-- (WALK-3, `uvc_parse_format`) One driving-walk step. Under the tiling, at a
+    boundary `pos` with the walk in range, a successful `uvc_parse_format`
+    returns `ret ≥ 1` and advances to another boundary still within `buf` — so
+    `ret` is exactly the bytes consumed, a contiguous run of descriptors. This
+    shared tiling is what lets `counting_additive` split the counting tally at
+    `pos + ret`. Feeds termination of the driving loop `parse_loop1`, its
+    in-bounds reads, and `frame_loop_invariant`'s room re-establishment. -/
+lemma uvc_parse_format_walk
+    (self : ParseState) (quirks : Std.U32) (fmt : UvcFormat) (frame_base : Std.Usize)
+    (buf : Slice Std.U8) (descs : List (List Std.U8))
+    (htile : descs.flatten = buf.val)
+    (hblk : ∀ d ∈ descs, 1 ≤ (d.getD 0 (0#u8)).val ∧
+              (d.getD 0 (0#u8)).val = d.length ∧ 3 ≤ d.length)
+    (hbound : buf.length ≤ 16777216)
+    (pos : Std.Usize) (buflen : Std.I32)
+    (hpb : (pos.val : ℤ) + buflen.val = (buf.length : ℤ))
+    (hbdry : AtBoundary descs pos.val)
+    (ret : Std.I32) (st' : ParseState) (fmt' : UvcFormat)
+    (hok : ParseState.uvc_parse_format self quirks fmt frame_base buf pos buflen
+        = ok (ret, st', fmt')) :
+    1 ≤ ret.val ∧
+    pos.val + ret.val.toNat ≤ buf.length ∧
+    AtBoundary descs (pos.val + ret.val.toNat) := by
+  sorry
+
+/-- (WALK-4, conjunct (iii): write ⊆ count) A format writes no more frames /
+    intervals over the block `[pos, pos+ret)` than `parse_loop0` tallies over the
+    same block. The block tally is `count(pos) − count(pos+ret)` (both from-zero
+    counting runs). Because the parse pass writes a frame only for
+    `buf[pos+2] == ftype`, a subset of the frame subtypes the counting pass
+    tallies (same tiling, identical interval offsets — COUNTING_LEMMA_NOTES
+    §2/§4), the writes are bounded by the tally. This is what
+    `frame_loop_invariant` turns into LOCAL FIT + room re-establishment, and
+    hence what the final (A) assembly uses for in-bounds writes. -/
+lemma format_writes_le_count
+    (self : ParseState) (quirks : Std.U32) (fmt : UvcFormat) (frame_base : Std.Usize)
+    (buf : Slice Std.U8) (descs : List (List Std.U8))
+    (htile : descs.flatten = buf.val)
+    (hblk : ∀ d ∈ descs, 1 ≤ (d.getD 0 (0#u8)).val ∧
+              (d.getD 0 (0#u8)).val = d.length ∧ 3 ≤ d.length)
+    (hbound : buf.length ≤ 16777216)
+    (pos : Std.Usize) (buflen : Std.I32)
+    (hpb : (pos.val : ℤ) + buflen.val = (buf.length : ℤ))
+    (hbdry : AtBoundary descs pos.val)
+    (ret : Std.I32) (st' : ParseState) (fmt' : UvcFormat)
+    (hok : ParseState.uvc_parse_format self quirks fmt frame_base buf pos buflen
+        = ok (ret, st', fmt'))
+    (nf cnt_f cnt_i : Std.U32)
+    (hcount : parse_loop0 buf 0#u32 0#u32 0#u32 pos buflen = ok (nf, cnt_f, cnt_i))
+    (pos' : Std.Usize) (buflen' : Std.I32) (nf' cf' ci' : Std.U32)
+    (hpos' : pos'.val = pos.val + ret.val.toNat)
+    (hbuflen' : buflen'.val = buflen.val - ret.val)
+    (hcount' : parse_loop0 buf 0#u32 0#u32 0#u32 pos' buflen' = ok (nf', cf', ci')) :
+    fmt'.nframes.val ≤ cnt_f.val - cf'.val ∧
+    st'.interval_cursor.val - self.interval_cursor.val ≤ cnt_i.val - ci'.val := by
+  sorry
+
 /-- (2) Frame-loop invariant — THE WORKHORSE (in-bounds writes, internal
     cursors), strengthened to be directly chainable as the induction step of the
     driving loop `parse_loop1`. `parse_loop0 buf 0 0 0 pos buflen = (nf,cnt_f,
@@ -1006,10 +1551,27 @@ end NoPanic
 #print axioms NoPanic.u32_add_shift
 #print axioms NoPanic.res_bind_eq_ok
 #print axioms NoPanic.loop_ok_inv
+#print axioms NoPanic.loop_no_div
+#print axioms NoPanic.guid_eq16_loop_no_div
+#print axioms NoPanic.uvc_format_by_guid_loop_no_div
+#print axioms NoPanic.parse_loop3_no_div
+#print axioms NoPanic.uvc_parse_frame_loop_no_div
+#print axioms NoPanic.fourcc_ne_div
+#print axioms NoPanic.UVC_FMTS_ne_div
+#print axioms NoPanic.sliceiter_next_ne_div
+#print axioms NoPanic.take_next_ne_div
+#print axioms NoPanic.take_next_some_n
+#print axioms NoPanic.enum_next_some
+#print axioms NoPanic.enum_next_ne_div
+#print axioms NoPanic.parse_loop2_no_div
 #print axioms NoPanic.loop_step_cont
 #print axioms NoPanic.loop_step_done
 #print axioms NoPanic.parse_loop0_eq
 #print axioms NoPanic.parse_no_div
+#print axioms NoPanic.descriptor_walk_step
+#print axioms NoPanic.uvc_parse_frame_walk
+#print axioms NoPanic.uvc_parse_format_walk
+#print axioms NoPanic.format_writes_le_count
 #print axioms NoPanic.counting_step_replay
 #print axioms NoPanic.counting_step_replay_gen
 #print axioms NoPanic.counting_monotone

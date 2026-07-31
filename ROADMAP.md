@@ -27,14 +27,18 @@ nontermination, never an undefined-behaviour outcome.
 **(A) No-panic on well-formed input** — under the parser's own validation
 invariants (`WellFormed`), `parse` returns `ok` without panicking. Panicking on
 malformed input is the intended safe behaviour and is not ruled out.
-**Stated; proof in progress.** (A) decomposes into termination, in-bounds reads,
-sized writes (the CVE-2024-53104 core), and no-overflow arithmetic.
+**In progress.** (A) decomposes into termination, in-bounds reads, sized writes
+(the CVE-2024-53104 core), and no-overflow arithmetic. Large parts are proved;
+the remainder is reduced to a named functional-correctness core (below).
 
-### The counting invariant (CVE-2024-53104 core) — proved
+### Proved, `sorryAx`-free
 
-The heart of (A) is the relationship between the counting pass (which sizes the
-allocation) and the parse pass (which writes into it). Its violation is exactly
-CVE-2024-53104. This block is fully machine-checked, `sorryAx`-free:
+Everything below is machine-checked with axioms `[propext, Classical.choice,
+Quot.sound]` only.
+
+**The counting invariant (CVE-2024-53104 core).** The relationship between the
+counting pass (which sizes the allocation) and the parse pass (which writes into
+it); its violation is exactly CVE-2024-53104.
 
 | Lemma | What it establishes |
 |---|---|
@@ -45,26 +49,45 @@ CVE-2024-53104. This block is fully machine-checked, `sorryAx`-free:
 | `counting_replay` | whole-loop replay: the parse pass follows the counting pass's path, counters shifted |
 | `counting_additive` | the counting pass is additive over the buffer (the fact (A) consumes) |
 
-All show axioms `[propext, Classical.choice, Quot.sound]` only.
+**Termination infrastructure and the structurally-terminating loops.**
 
-### Remaining for (A)
+| Lemma | What it establishes |
+|---|---|
+| `loop_no_div` | reusable measure-based termination principle for Aeneas loops (the div-only counterpart of `loop_ok_inv`) |
+| `guid_eq16_loop_no_div`, `uvc_format_by_guid_loop_no_div`, `parse_loop3_no_div`, `uvc_parse_frame_loop_no_div`, `parse_loop2_no_div` | div-freeness for the 5 structurally-terminating loops |
+| the `*_ne_div` toolkit + `hd_ne_div` tactic | reusable div-freeness discharge for binds, indexing, iterators, and arithmetic |
 
-| Piece | Status | Note |
+### The remaining core, named (stated, proofs pending)
+
+The rest of (A) — the 6 buffer-walk loops' termination, the write-bounds
+invariant, and the final assembly — all reduce to four stated lemmas. Together
+they are the positional-walk functional-correctness core: they relate
+`WellFormed`'s abstract descriptor tiling to the parser's concrete `pos`-walk.
+
+| Lemma | What it will establish | Feeds |
 |---|---|---|
-| `counting_additive` and its supporting block | proved | above |
-| `parse_no_div` (termination / div-freeness) | `sorry` | a loop-termination argument; `loop_ok_inv` should carry it |
-| `frame_loop_invariant` (writes stay in the allocated `Vec`) | `sorry` | consumes the counting block above |
-| assembling (A) from the pieces | not started | reads via `WellFormed`, arithmetic via the overflow bounds |
+| `descriptor_walk_step` | each visited position is a descriptor boundary with `bLength >= 1`, and stepping by it stays in-buffer | `parse_loop0` termination + in-bounds reads |
+| `uvc_parse_frame_walk` | a successful `uvc_parse_frame` consumes `ret >= 1` bytes and lands on a boundary | `uvc_parse_format_loop0..3` termination |
+| `uvc_parse_format_walk` | same for `uvc_parse_format` (`ret` = exact bytes consumed, lands on a boundary) | `parse_loop1` termination + `frame_loop_invariant` room |
+| `format_writes_le_count` | writes are a subset of what the counting pass tallied over the consumed block (conjunct iii) | `frame_loop_invariant` + the final (A) write-bounds |
+
+`parse_no_div`, `frame_loop_invariant`, and the assembly of (A) are stated and
+consume the four lemmas above. Proving those four is the next milestone.
 
 ## Known hard problems
 
 - **Reasoning about Aeneas-extracted loops.** Aeneas lowers loops to Lean
   `partial_fixpoint` combinators, not ordinary recursive definitions, so naive
-  structural induction does not apply. The working idiom here is a
-  partial-correctness loop invariant (`= ok -> post`, admissible because it holds
-  vacuously at `div`), packaged as `loop_ok_inv` and reused across the counting
-  block. The same principle is expected to carry `parse_no_div` and
-  `frame_loop_invariant`.
+  structural induction does not apply. Two reusable principles handle this: a
+  partial-correctness invariant (`= ok -> post`, admissible because it holds
+  vacuously at `div`), packaged as `loop_ok_inv`; and a measure-based
+  termination principle, `loop_no_div`. Both are proved and reused across the
+  work above.
+- **The positional-walk invariant is the hard core.** The four stated lemmas are
+  functional correctness of the buffer walk: that the parser's `pos`-walk visits
+  exactly the descriptor boundaries `WellFormed` describes, and that `ret` equals
+  the bytes consumed. This is the substantial remaining proof work, and it is the
+  same core whether approached via termination or via write-bounds.
 - **Compiler-dependent UB at one arithmetic site.** The differential equivalence
   holds against the clang-compiled C; a gcc build resolves the one
   signed-overflow site differently, which simply re-proves it is undefined
@@ -73,7 +96,8 @@ All show axioms `[propext, Classical.choice, Quot.sound]` only.
 
 ## Direction
 
-- Close (A): `parse_no_div`, `frame_loop_invariant`, then assemble.
+- Close (A): prove the four walk-invariant lemmas, from which `parse_no_div`,
+  `frame_loop_invariant`, and the assembly follow.
 - Apply the same loop (extract -> rewrite -> differential fuzz -> selective proof)
   to further untrusted-input parsers; the fuzzing harness and the loop-reasoning
   infrastructure are built to be reused.
