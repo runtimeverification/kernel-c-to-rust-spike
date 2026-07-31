@@ -32,25 +32,28 @@ years apart (CVE-2008-3496, CVE-2024-53104, the latter in the CISA KEV catalog).
 4. **Formal verification** (`verify/`). The faithful Rust leaf extracts through
    Charon and Aeneas into Lean 4 with no `sorry` in the generated code, and
    with no union blocker (unlike the Binder spike). Two theorems, in
-   `verify/VERIFY-REPORT.md`:
+   `verify/VERIFY-REPORT.md` and `ROADMAP.md`:
    - Total safety on all input (every outcome is `ok` / controlled `fail` /
      nontermination, never an undefined-behaviour outcome): proved, `sorry`-free.
      This makes explicit, as a checked statement, the memory-safety property the
      C lacks.
    - No-panic on well-formed input (panic occurs only on malformed input, where
-     it is the intended safe behavior replacing the C's OOB write): stated
-     against the real extracted function, proof left open. Its core is the
-     counting-pass-versus-write-index invariant whose violation is
-     CVE-2024-53104; the differential fuzzer exercised this dynamically, and
-     closing the proof is the main remaining verification work.
+     it is the intended safe behavior replacing the C's OOB write): in progress.
+     The counting-vs-write invariant whose violation is CVE-2024-53104 is proved
+     `sorry`-free, along with two reusable Aeneas loop-reasoning principles and
+     div-freeness for the 5 structurally-terminating loops. The remainder reduces
+     to a named positional-walk functional-correctness core (four stated lemmas);
+     see `ROADMAP.md`.
 
 ## Status
 
 The loop is demonstrated end to end on one target. The rewrite is shown
 equivalent to the C by differential fuzzing; the memory-safety difference is
 made concrete by the negative control; the Rust extracts cleanly into Lean and
-its total-safety property is machine-checked. The functional-correctness theorem
-(no-panic on well-formed input) is formalized and scoped, not yet proved.
+its total-safety property is machine-checked. For the no-panic theorem, the
+counting invariant (the CVE-2024-53104 core) is proved `sorry`-free and the
+remaining work is reduced to a named functional-correctness core, stated but not
+yet proved. Full proof status and the open lemmas are in `ROADMAP.md`.
 
 ## Layout
 
@@ -58,6 +61,8 @@ its total-safety property is machine-checked. The functional-correctness theorem
 - `rust/` — the safe-Rust rewrite
 - `fuzz/` — the LibAFL differential fuzzer, results, and CVE-class control
 - `verify/` — Charon/Aeneas/Lean extraction and theorems
+- `ROADMAP.md` — proof status and the remaining open lemmas
+- `OPEN_CHALLENGES.md` — concrete tasks a contributor can pick up
 - `*/README.md`, `fuzz/RESULTS.md`, `verify/VERIFY-REPORT.md` — per-stage detail
 
 ## Environment
