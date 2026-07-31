@@ -328,6 +328,42 @@ theorem loop_step_done {α β : Type} (body : α → Result (ControlFlow α β))
     (x : α) (y : β) (h : body x = ok (ControlFlow.done y)) :
     loop body x = ok y := by rw [loop.eq_def, h]
 
+/-- Div-freeness (termination) principle for Aeneas' `loop` — the counterpart of
+    `loop_ok_inv`, but for ruling out `div` instead of establishing a
+    postcondition. If every reachable body step is itself div-free (`hbody`) and,
+    on a `cont` step, strictly decreases a `Nat` measure while preserving the
+    invariant (`hstep`), then the whole loop never returns `div`.
+
+    Unlike `loop_ok_inv`, this is NOT a `fixpoint_induct` argument: the predicate
+    `· ≠ div` is FALSE at the `div` bottom, so it is not admissible and partial
+    correctness cannot deliver it. Termination must be supplied by the measure —
+    here via well-founded (strong) induction on `measure x : Nat`. `fail` is left
+    unconstrained: this rules out `div` only, exactly the div-freeness half of a
+    no-panic proof (the `fail` half is separate). -/
+theorem loop_no_div {α β : Type} (body : α → Result (ControlFlow α β))
+    (measure : α → Nat) (inv : α → Prop)
+    (hbody : ∀ x, inv x → body x ≠ div)
+    (hstep : ∀ x x', inv x → body x = ok (ControlFlow.cont x') →
+        inv x' ∧ measure x' < measure x)
+    (x : α) (hinv : inv x) : loop body x ≠ div := by
+  suffices H : ∀ n x, measure x = n → inv x → loop body x ≠ div from
+    H (measure x) x rfl hinv
+  intro n
+  induction n using Nat.strong_induction_on with
+  | _ n ih =>
+    intro x hmx hix
+    rw [loop.eq_def]
+    cases hb : body x with
+    | ok r =>
+      cases r with
+      | cont x' =>
+        obtain ⟨hix', hlt⟩ := hstep x x' hix hb
+        subst hmx
+        simpa using ih (measure x') hlt x' rfl hix'
+      | done y => simp
+    | fail e => simp
+    | div => exact absurd hb (hbody x hix)
+
 /-- `parse_loop0` as a bare `loop` over a projection-style body (defeq to the
     Aeneas-generated pattern-lambda). Lets the loop lemmas above refer to a
     single, syntactically stable body term. -/
@@ -1006,6 +1042,7 @@ end NoPanic
 #print axioms NoPanic.u32_add_shift
 #print axioms NoPanic.res_bind_eq_ok
 #print axioms NoPanic.loop_ok_inv
+#print axioms NoPanic.loop_no_div
 #print axioms NoPanic.loop_step_cont
 #print axioms NoPanic.loop_step_done
 #print axioms NoPanic.parse_loop0_eq
